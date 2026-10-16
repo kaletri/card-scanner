@@ -366,7 +366,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16f</p>
+      <p class="build-version">build 2026-10-16h</p>
     </section>
   </main>
 
@@ -1246,7 +1246,11 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan,
       var next = nextQueryIndex(jobs, i, cards.length > 0);
       if (!cards.length) return tryNext(next);
       var ranked = scoreResults(cards, scoreNames, number, setSize);
-      if (!ranked.length || ranked[0].score <= 0) return tryNext(next);
+      /* When a collector number was read, scoreResults has already kept
+         only cards whose printed number matches it — present those even at
+         score 0. A clean number read outweighs a garbled name read; the
+         minimum name score only gates results when no number was read. */
+      if (!ranked.length || (!number && ranked[0].score <= 0)) return tryNext(next);
       scanning = false;
       handleMatch(ranked.map(function(x){ return x.card; }), correction.name, {
         raw:rawRead,
@@ -1332,7 +1336,10 @@ function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForSc
       var next = nextQueryIndex(jobs, i, cards.length > 0);
       if (!cards.length) return tryNext(next);
       var ranked = scoreResults(cards, candidates, number, setSize);
-      if (!ranked.length || ranked[0].score <= 0) return tryNext(next);
+      /* Number-matched results are presented even at score 0 (see
+         tryFuzzyQueries) — the full ranked list also feeds the detail
+         sheet's "Not this card?" alternatives. */
+      if (!ranked.length || (!number && ranked[0].score <= 0)) return tryNext(next);
       scanning = false;
       handleMatch(ranked.map(function(x){ return x.card; }), jobs[i].cand, null, scanThumb);
     }).catch(function(){ tryNext(i + 1); });
@@ -1361,7 +1368,9 @@ function wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb){
       apiFetch(queries[i], 12).then(function(cards){
         if (!cards.length) return tryNext(i+1);
         var ranked = scoreResults(cards, names, numMatch ? numMatch[1] : null);
-        if (!ranked.length || ranked[0].score <= 0) return tryNext(i+1);
+        /* Number-matched results are presented even at score 0 (see
+           tryFuzzyQueries). */
+        if (!ranked.length || (!numMatch && ranked[0].score <= 0)) return tryNext(i+1);
         scanning = false;
         handleMatch(ranked.map(function(x){ return x.card; }), names[i], null, scanThumb);
       }).catch(function(){ tryNext(i+1); });
@@ -1468,21 +1477,36 @@ function identifyCanvas(source, sourceLabel){
   var scanThumb = scanThumbFromSource(src);
   /* The embedded index is ready before any scan can begin. */
   var nameIndexForScan = cardNameIndex;
-  // Read the independent name band and collector-number strip in parallel.
+  // Read the independent name band and collector-number strips in parallel.
   // The name band crops to the center 60% horizontally: the full-width band
   // also catches the "STAGE 1" box on the left and "HP 90" on the right,
-  // which OCR mangles into the name read. The number strip keeps full width.
+  // which OCR mangles into the name read. The number strips crop to y 84-97%
+  // at BOTH bottom corners (x 0-45% and x 55-100%): most sets print the
+  // number bottom-left, some print it bottom-right, and the tight crops
+  // keep the weakness/retreat bar, illustrator credit, flavor text, and
+  // copyright line out of the reads.
   var band = null;
-  var strip = null;
+  var stripL = null;
+  var stripR = null;
   try { band = ocrPrepBand(src, 0, 0.16, 0.20, 0.60); } catch (e) { band = null; }
-  try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
+  try { stripL = ocrPrepBand(src, 0.84, 0.13, 0, 0.45); } catch (e) { stripL = null; }
+  try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45); } catch (e) { stripR = null; }
   var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
-  var numRun = strip ? ocrRecognize(strip, 3).catch(function(){ return null; }) : Promise.resolve(null);
-  Promise.all([bandRun, numRun]).then(function(reads){
+  var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
+  var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
+  Promise.all([bandRun, numRunL, numRunR]).then(function(reads){
     var bandText = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var candidates = bandNameCandidates(bandText);
-    var numText = (reads[1] && reads[1].data && reads[1].data.text) || "";
-    var parsed = parsePrintedNumber(numText);
+    var numTextL = (reads[1] && reads[1].data && reads[1].data.text) || "";
+    var numTextR = (reads[2] && reads[2].data && reads[2].data.text) || "";
+    /* Pick the corner read to trust: a clean "123/214" slash pair beats a
+       bare number, and when both corners produce a pair the left wins —
+       that's where most sets print it. */
+    var parsedL = parsePrintedNumber(numTextL);
+    var parsedR = parsePrintedNumber(numTextR);
+    var parsed = (parsedL && parsedL.setSize) ? parsedL
+      : (parsedR && parsedR.setSize) ? parsedR
+      : (parsedL || parsedR);
     var number = parsed ? parsed.number : null;
     var setSize = parsed ? parsed.setSize : null;
     function nameFlow(){
