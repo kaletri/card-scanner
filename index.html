@@ -367,7 +367,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16k</p>
+      <p class="build-version">build 2026-10-16l</p>
     </section>
   </main>
 
@@ -806,7 +806,12 @@ function renderDetail(){
   $("dSnapNote").textContent = "Prices snapshotted " + t.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}) +
     " from TCGplayer market (NM). Played conditions are estimated from NM with your Settings factors.";
 
-  var showAlts = detail.candidates && detail.candidates.length > 1;
+  /* The "Not this card?" button shows whenever a genuinely different
+     candidate came back with the match — not only when the top score was
+     weak. A digit-confusion rescue (neighbor numbers merged into the
+     number-first results) is exactly the case where the top hit can be
+     confidently wrong, so alternatives must always be one tap away. */
+  var showAlts = !!(detail.candidates && detail.candidates.some(function(a){ return a.id !== c.id; }));
   $("dAltsWrap").style.display = showAlts ? "block" : "none";
   $("dAlts").style.display = "none";
   if (showAlts){
@@ -1376,7 +1381,15 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan,
    any name-based tier: the pair is specific enough that a single hit is
    accepted outright, and multiple hits are ranked against the (possibly
    garbled) name read. Only an empty number query falls back to the
-   name-based tiers via onMiss. */
+   name-based tiers via onMiss.
+   Digit confusion: Tesseract misreads lookalike digits (3 as 2, 6 as 8,
+   1 as 7), so a read of "122" may really be a "123" card. When the exact
+   number query returns results, the neighboring numbers (121 and 123) are
+   queried with the same set size too and merged in before name ranking —
+   the name score then puts the true card first ("Dug" matches "Dugtrio",
+   not "Diglett"), and the neighbors ride along as "Not this card?"
+   alternatives. The expansion only fires when the exact query hit, so a
+   bad number read never triples the query count. */
 function commonPrefixLen(a, b){
   var n = Math.min(a.length, b.length), i = 0;
   while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
@@ -1418,13 +1431,48 @@ function tryNumberFirstQueries(number, setSize, candidates, onMiss, scanThumb){
     var matching = (cards || []).filter(function(c){ return numberMatches(c.number, number); });
     if (!matching.length){ onMiss(); return; }
     var readLabel = (candidates && candidates[0]) || (number + "/" + setSize);
-    scanning = false;
-    if (matching.length === 1){
-      handleMatch(matching, readLabel, null, scanThumb);
-      return;
+    /* Neighbor expansion for OCR digit confusion — plain-digit numbers
+       only (letter-prefixed gallery numbers like TG03 have no meaningful
+       ±1). A neighbor query that fails or finds nothing just contributes
+       no cards; the exact-number results stand on their own. */
+    var n = /^\d+$/.test(String(number).trim()) ? parseInt(number, 10) : NaN;
+    var neighbors = [];
+    if (!isNaN(n)){
+      if (n > 1) neighbors.push(String(n - 1));
+      neighbors.push(String(n + 1));
     }
-    var ranked = rankNumberMatches(matching, candidates);
-    handleMatch(ranked.map(function(x){ return x.card; }), readLabel, null, scanThumb);
+    if (!neighbors.length){ present(matching); return; }
+    Promise.all(neighbors.map(function(nb){
+      return apiFetchWithRetries('number:"' + nb + '" set.printedTotal:' + setSize, 24)
+        .then(function(cs){ return (cs || []).filter(function(c){ return numberMatches(c.number, nb); }); })
+        .catch(function(){ return []; });
+    })).then(function(neighborLists){
+      var seen = {}, merged = [];
+      matching.concat.apply(matching, neighborLists).forEach(function(c){
+        if (c && c.id && !seen[c.id]){ seen[c.id] = 1; merged.push(c); }
+      });
+      present(merged.length ? merged : matching);
+    });
+    function present(list){
+      scanning = false;
+      if (list.length === 1){
+        handleMatch(list, readLabel, null, scanThumb);
+        return;
+      }
+      var ranked = rankNumberMatches(list, candidates);
+      /* A neighbor whose name clearly out-reads the exact number's cards
+         leads — that's the digit-confusion rescue. But when no name token
+         scores at all (garbled name read), the number read is the only
+         signal: keep the exact number's cards ahead of the neighbors. */
+      if (ranked.length && ranked[0].score <= 0){
+        ranked.sort(function(a, b){
+          var ea = numberMatches(a.card.number, number) ? 0 : 1;
+          var eb = numberMatches(b.card.number, number) ? 0 : 1;
+          return (ea - eb) || (a.idx - b.idx);
+        });
+      }
+      handleMatch(ranked.map(function(x){ return x.card; }), readLabel, null, scanThumb);
+    }
   }).catch(function(){ onMiss(); });
 }
 function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan, scanThumb){
@@ -1724,7 +1772,7 @@ function renderQueue(){
         showView("scan");
         return;
       }
-      openDetail(q.card, { candidates: q.candidates.length>1 ? q.candidates : null, queueId: q.id, scanThumb: q.scanThumb || null });
+      openDetail(q.card, { candidates: q.candidates.length ? q.candidates : null, queueId: q.id, scanThumb: q.scanThumb || null });
     });
   });
 }
