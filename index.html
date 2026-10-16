@@ -366,7 +366,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16h</p>
+      <p class="build-version">build 2026-10-16i</p>
     </section>
   </main>
 
@@ -1071,20 +1071,23 @@ function scannedPhotoHtml(src, compact){
   if (compact) return '<img class="scan-source-thumb" src="' + esc(src) + '" alt="Scanned photo">';
   return '<div class="scan-photo"><img src="' + esc(src) + '" alt="Scanned photo"><div class="scan-photo-label"><b>Scanned photo</b>Image used for this identification</div></div>';
 }
-function ocrPrepBand(source, yFrac, hFrac, xFrac, wFrac){
-  // crop a band, upscale 2x, then grayscale + contrast-stretch per pixel
-  // (no ctx.filter — iOS support is inconsistent). xFrac/wFrac optionally
-  // narrow the crop horizontally (fractions of the source width); omitting
-  // them keeps the full width.
+function ocrPrepBand(source, yFrac, hFrac, xFrac, wFrac, scale){
+  // crop a band, upscale it (2x by default; the number strips pass 3x so
+  // Tesseract gets more pixels on the small printed digits), then
+  // grayscale + contrast-stretch per pixel (no ctx.filter — iOS support
+  // is inconsistent). xFrac/wFrac optionally narrow the crop
+  // horizontally (fractions of the source width); omitting them keeps
+  // the full width.
   var sw = source.width, sh = source.height;
   var xf = (xFrac == null ? 0 : xFrac), wf = (wFrac == null ? 1 : wFrac);
+  var k = (scale == null ? 2 : scale);
   var sx = Math.min(sw - 1, Math.round(sw * xf));
   var bw = Math.max(1, Math.round(sw * wf));
   var sy = Math.min(sh - 1, Math.round(sh * yFrac));
   var bh = Math.max(1, Math.round(sh * hFrac));
   var c = document.createElement("canvas");
-  c.width = bw * 2;
-  c.height = bh * 2;
+  c.width = bw * k;
+  c.height = bh * k;
   var ctx = c.getContext("2d");
   ctx.drawImage(source, sx, sy, bw, bh, 0, 0, c.width, c.height);
   var img = ctx.getImageData(0, 0, c.width, c.height);
@@ -1480,17 +1483,20 @@ function identifyCanvas(source, sourceLabel){
   // Read the independent name band and collector-number strips in parallel.
   // The name band crops to the center 60% horizontally: the full-width band
   // also catches the "STAGE 1" box on the left and "HP 90" on the right,
-  // which OCR mangles into the name read. The number strips crop to y 84-97%
-  // at BOTH bottom corners (x 0-45% and x 55-100%): most sets print the
-  // number bottom-left, some print it bottom-right, and the tight crops
-  // keep the weakness/retreat bar, illustrator credit, flavor text, and
-  // copyright line out of the reads.
+  // which OCR mangles into the name read. The number strips read BOTH
+  // bottom corners: the left crop is a tight box (x 12-38%, y 86-93%)
+  // around where most sets print the number, below the illustrator
+  // credit — the weakness bar above and the copyright/flavor text around
+  // it stay out of the read — while the right crop keeps the wider
+  // x 55-100%, y 84-97% box for sets with right-side numbering. Both
+  // strips upscale 3x so the small printed digits give Tesseract more
+  // pixels to work with.
   var band = null;
   var stripL = null;
   var stripR = null;
   try { band = ocrPrepBand(src, 0, 0.16, 0.20, 0.60); } catch (e) { band = null; }
-  try { stripL = ocrPrepBand(src, 0.84, 0.13, 0, 0.45); } catch (e) { stripL = null; }
-  try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45); } catch (e) { stripR = null; }
+  try { stripL = ocrPrepBand(src, 0.86, 0.07, 0.12, 0.26, 3); } catch (e) { stripL = null; }
+  try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45, 3); } catch (e) { stripR = null; }
   var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
   var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
   var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
