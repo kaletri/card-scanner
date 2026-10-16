@@ -139,6 +139,7 @@
   .cond-mid .cp{font-family:var(--font-m);font-weight:600;font-size:16px}
   .cond-mid .cw{font-size:11.5px;color:var(--ink2)}
   .cond-mid .cw b{color:var(--good);font-family:var(--font-m)}
+  .cond-mid .cw b.zero{color:var(--warn)}
   .cond-chev{color:var(--ink2)}
   .cond-chev svg{width:18px;height:18px}
 
@@ -366,7 +367,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16i</p>
+      <p class="build-version">build 2026-10-16k</p>
     </section>
   </main>
 
@@ -788,7 +789,7 @@ function renderDetail(){
       '<span class="cond-ab">'+cond.ab+'</span>' +
       '<span class="cond-mid"><span class="cp">'+(price==null?"No price":money(price))+'</span>' +
       (cond.key!=="nm" ? ' <span style="font-size:11px;color:var(--ink2)">est. from NM</span>' : "") +
-      '<br><span class="cw">WorthIt: buy at <b>'+money(w)+'</b> or under</span></span>' +
+      '<br><span class="cw">WorthIt: buy at <b'+(w>0?"":' class="zero"')+'>'+money(w)+'</b> or under</span></span>' +
       '<span class="cond-chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></button>';
   }).join("");
   $("dConds").querySelectorAll("[data-cond]").forEach(function(b){
@@ -1054,6 +1055,112 @@ function downscaleForOcr(source){
   c.width = Math.round(source.width * scale);
   c.height = Math.round(source.height * scale);
   c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
+  return c;
+}
+/* ---- Card finder: isolate the card by its border ----
+   Not every Pokemon card has the classic yellow border: Scarlet &
+   Violet-era cards use a silver border, and full-art cards have no
+   border at all. Detection runs on a ~400px downscale (~160k pixels —
+   trivial next to an OCR pass) and tries, in order:
+   1. YELLOW — "card yellow" pixels (high red+green, low blue; the
+      r+b < g*2.2 guard excludes skin and orange tones). The largest
+      connected yellow region is the card when its bounding box covers
+      15-95% of the frame with a card-like portrait aspect (w/h 0.6-0.8).
+   2. SILVER — neutral-gray pixels (r/g/b within 15 of each other,
+      brightness 120-200: silver, not white), same box gates.
+   Both passes also require the region to form a FRAME, not a blob:
+   the region's own pixels fill only a small share of its bounding box
+   (a ring is mostly hole). That keeps gray text blocks, gray surfaces,
+   and solid yellow playmats out — and it is why coverage is measured
+   by the box: a border ring's own pixels are only ~2-9% of a photo, so
+   a pixel-count gate would reject every real border.
+   3. Neither found → null; the caller keeps the full image (full-art
+      cards, edge-to-edge shots, rotated photos, heavy glare). A border
+      ring is one connected region whose bbox IS the card's bounds;
+      the returned crop adds a 2% margin around it. */
+/* Largest connected component (4-connected) via iterative flood fill. */
+function largestComponent(mask, w, h){
+  var visited = new Uint8Array(w * h);
+  var stack = [];
+  var best = null;
+  for (var start = 0; start < mask.length; start++){
+    if (!mask[start] || visited[start]) continue;
+    var count = 0, minX = w, maxX = -1, minY = h, maxY = -1;
+    stack.length = 0;
+    stack.push(start);
+    visited[start] = 1;
+    while (stack.length){
+      var cur = stack.pop();
+      count++;
+      var cx = cur % w, cy = (cur / w) | 0;
+      if (cx < minX) minX = cx;
+      if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy;
+      if (cy > maxY) maxY = cy;
+      if (cx > 0     && mask[cur - 1] && !visited[cur - 1]){ visited[cur - 1] = 1; stack.push(cur - 1); }
+      if (cx < w - 1 && mask[cur + 1] && !visited[cur + 1]){ visited[cur + 1] = 1; stack.push(cur + 1); }
+      if (cy > 0     && mask[cur - w] && !visited[cur - w]){ visited[cur - w] = 1; stack.push(cur - w); }
+      if (cy < h - 1 && mask[cur + w] && !visited[cur + w]){ visited[cur + w] = 1; stack.push(cur + w); }
+    }
+    if (!best || count > best.count) best = { count: count, minX: minX, maxX: maxX, minY: minY, maxY: maxY };
+  }
+  return best;
+}
+/* Apply the acceptance gates to a candidate border region and, if it
+   passes, map its bounding box back to source pixels with a 2% margin.
+   The box must cover 15-95% of the frame with a card-like portrait
+   aspect, and the region must fill only a ring's share of the box. */
+function boundsFromRegion(region, w, h, sw, sh, scale){
+  if (!region) return null;
+  var bw = region.maxX - region.minX + 1, bh = region.maxY - region.minY + 1;
+  if (!bw || !bh) return null;
+  var aspect = bw / bh;
+  if (aspect < 0.6 || aspect > 0.8) return null;
+  var boxFrac = (bw * bh) / (w * h);
+  if (boxFrac < 0.15 || boxFrac > 0.95) return null;
+  var fill = region.count / (bw * bh);
+  if (fill < 0.04 || fill > 0.5) return null; /* a ring, not a blob */
+  var x0 = Math.max(0, Math.round(region.minX / scale - sw * 0.02));
+  var y0 = Math.max(0, Math.round(region.minY / scale - sh * 0.02));
+  var x1 = Math.min(sw, Math.round((region.maxX + 1) / scale + sw * 0.02));
+  var y1 = Math.min(sh, Math.round((region.maxY + 1) / scale + sh * 0.02));
+  if (x1 - x0 < 10 || y1 - y0 < 10) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+function findCardBounds(source){
+  var sw = source.width, sh = source.height;
+  if (!sw || !sh) return null;
+  var scale = Math.min(1, 400 / sw);
+  var w = Math.max(1, Math.round(sw * scale));
+  var h = Math.max(1, Math.round(sh * scale));
+  var c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  var ctx = c.getContext("2d");
+  ctx.drawImage(source, 0, 0, w, h);
+  var d;
+  try { d = ctx.getImageData(0, 0, w, h).data; } catch (e) { return null; }
+  var yellow = new Uint8Array(w * h);
+  var silver = new Uint8Array(w * h);
+  for (var i = 0, p = 0; i < d.length; i += 4, p++){
+    var r = d[i], g = d[i + 1], b = d[i + 2];
+    if (r > 150 && g > 120 && b < 100 && (r + b) < g * 2.2){
+      yellow[p] = 1;
+    } else {
+      var hi = Math.max(r, g, b), lo = Math.min(r, g, b);
+      var bright = (r + g + b) / 3;
+      if (hi - lo <= 15 && bright >= 120 && bright <= 200) silver[p] = 1;
+    }
+  }
+  var bounds = boundsFromRegion(largestComponent(yellow, w, h), w, h, sw, sh, scale);
+  if (bounds) return bounds;
+  return boundsFromRegion(largestComponent(silver, w, h), w, h, sw, sh, scale);
+}
+function autoCropToCard(source){
+  var b = findCardBounds(source);
+  if (!b) return null;
+  var c = document.createElement("canvas");
+  c.width = b.w; c.height = b.h;
+  c.getContext("2d").drawImage(source, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
   return c;
 }
 function scanThumbFromSource(source){
@@ -1477,13 +1584,28 @@ function identifyCanvas(source, sourceLabel){
     return;
   }
   var src = downscaleForOcr(source);
+  /* Isolate the card before any OCR crop: when the yellow border is
+     found, the name band and number strips below are cut from the card
+     alone instead of the whole photo, so the band/strip fractions land
+     where they were calibrated to land. No suitable yellow region means
+     the full image flows through exactly as before. */
+  var isolated = null;
+  try { isolated = autoCropToCard(src); } catch (e) { isolated = null; }
+  if (isolated){
+    src = isolated;
+    setScanStatus('<span class="spinner"></span>Card found — reading the card name…');
+  }
   var scanThumb = scanThumbFromSource(src);
   /* The embedded index is ready before any scan can begin. */
   var nameIndexForScan = cardNameIndex;
   // Read the independent name band and collector-number strips in parallel.
   // The name band crops to the center 60% horizontally: the full-width band
   // also catches the "STAGE 1" box on the left and "HP 90" on the right,
-  // which OCR mangles into the name read. The number strips read BOTH
+  // which OCR mangles into the name read. Vertically the band starts at
+  // y 5% instead of the top edge: phone photos often include background
+  // (table, playmat) above the card, and OCRing that fabric returns
+  // garbage. The printed name sits around y 8-12%, safely inside the
+  // 5-16% band even when the card fills the frame edge-to-edge. The number strips read BOTH
   // bottom corners: the left crop is a tight box (x 12-38%, y 86-93%)
   // around where most sets print the number, below the illustrator
   // credit — the weakness bar above and the copyright/flavor text around
@@ -1494,7 +1616,7 @@ function identifyCanvas(source, sourceLabel){
   var band = null;
   var stripL = null;
   var stripR = null;
-  try { band = ocrPrepBand(src, 0, 0.16, 0.20, 0.60); } catch (e) { band = null; }
+  try { band = ocrPrepBand(src, 0.05, 0.11, 0.20, 0.60); } catch (e) { band = null; }
   try { stripL = ocrPrepBand(src, 0.86, 0.07, 0.12, 0.26, 3); } catch (e) { stripL = null; }
   try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45, 3); } catch (e) { stripR = null; }
   var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
