@@ -988,7 +988,7 @@ function bandNameCandidates(text){
   }
   function bare(w){ return w.replace(/\.+$/, ""); }
   var counts = {}, display = {}, firstSeen = {}, seq = 0;
-  var pairs = [], pairSeen = {};
+  var pairCount = {}, pairInfo = {}, pairOrder = [], pairSeq = 0;
   var lines = text.split(/\n/);
   lines.forEach(function(line){
     var toks = line.match(wordRe) || [];
@@ -1002,10 +1002,12 @@ function bandNameCandidates(text){
     });
     for (var i = 0; i + 1 < toks.length; i++){
       if (isCap(toks[i]) && isCap(toks[i + 1])){
-        var pair = bare(toks[i] + " " + toks[i + 1]);
-        if (pair.length >= 3 && !pairSeen[pair.toLowerCase()]){
-          pairSeen[pair.toLowerCase()] = 1;
-          pairs.push(pair);
+        var w1 = bare(toks[i]), w2 = bare(toks[i + 1]);
+        var pair = w1 + " " + w2;
+        var pk = pair.toLowerCase();
+        if (pair.length >= 3){
+          if (!(pk in pairCount)){ pairCount[pk] = 0; pairInfo[pk] = { text: pair, w1: w1.toLowerCase(), w2: w2.toLowerCase(), order: pairSeq++ }; pairOrder.push(pk); }
+          pairCount[pk]++;
         }
       }
     }
@@ -1015,21 +1017,91 @@ function bandNameCandidates(text){
     if (display[b].length !== display[a].length) return display[b].length - display[a].length;
     return firstSeen[a] - firstSeen[b];
   }).map(function(k){ return display[k]; });
+  /* Multi-word reads first: adjacent capitalized pairs (best combined word
+     frequency first), then longer whole-line phrases, then single words. A
+     partial single-word read like "Alolan" must never outrank the full name. */
+  var pairs = pairOrder.sort(function(a, b){
+    var fa = (counts[pairInfo[a].w1] || 0) + (counts[pairInfo[a].w2] || 0);
+    var fb = (counts[pairInfo[b].w1] || 0) + (counts[pairInfo[b].w2] || 0);
+    if (fb !== fa) return fb - fa;
+    if (pairCount[b] !== pairCount[a]) return pairCount[b] - pairCount[a];
+    return pairInfo[a].order - pairInfo[b].order;
+  }).map(function(k){ return pairInfo[k].text; });
+  var phrases = lines.map(function(line){ return cleanName(line); })
+    .filter(function(l){ return l.split(" ").filter(Boolean).length >= 2; })
+    .sort(function(a, b){
+      var wa = a.split(" ").length, wb = b.split(" ").length;
+      if (wb !== wa) return wb - wa;
+      return b.length - a.length;
+    });
   var out = [], seen = {};
   function pushCand(c){
     var k = c.toLowerCase();
     if (c.length >= 3 && !seen[k]){ seen[k] = 1; out.push(c); }
   }
-  singles.forEach(pushCand);
   pairs.forEach(pushCand);
+  phrases.forEach(pushCand);
+  singles.forEach(pushCand);
   lines.forEach(function(line){ pushCand(cleanName(line)); });
   return out.slice(0, 8);
 }
-function tryBandQueries(candidates, number, sourceLabel){
+/* Compare a printed collector number from the card against a catalog result's
+   number: all-digit forms compare numerically ("087" equals "87"); anything
+   with a letter prefix ("TG03") compares exactly (case-insensitive, trimmed). */
+function numberMatches(a, b){
+  var x = String(a == null ? "" : a).trim().toUpperCase();
+  var y = String(b == null ? "" : b).trim().toUpperCase();
+  if (!x || !y) return false;
+  if (/^\d+$/.test(x) && /^\d+$/.test(y)) return parseInt(x, 10) === parseInt(y, 10);
+  return x === y;
+}
+/* Score catalog results against the full OCR read before accepting any of
+   them: +2 for each ranked candidate word that appears as a whole word in the
+   result's name (case-insensitive), +3 when the result's collector number
+   equals the number read off the card, +4 when the result's set.printedTotal
+   equals the set size read off the card. Acceptance rule: when a collector
+   number was read off the card, only results whose printed number matches it
+   are kept — a card with a different printed number is never the answer.
+   Returns the results best-first, so the best alternative also leads the
+   "Not this card?" list. */
+function scoreResults(cards, candidates, number, setSize){
+  var words = {};
+  (candidates || []).forEach(function(c){
+    String(c).split(/\s+/).forEach(function(w){
+      w = w.toLowerCase().replace(/['’]/g, "").replace(/\.+$/, "");
+      if (w) words[w] = 1;
+    });
+  });
+  var numStr = number != null ? String(number).trim() : "";
+  var sizeStr = setSize != null ? String(setSize).trim() : "";
+  function nameTokens(name){
+    return String(name || "").toLowerCase().replace(/['’]/g, "")
+      .split(/[^a-zà-ÿ0-9]+/).filter(function(t){ return !!t; });
+  }
+  var scored = cards.map(function(c, idx){
+    var toks = nameTokens(c.name);
+    var s = 0;
+    Object.keys(words).forEach(function(w){
+      if (toks.indexOf(w) >= 0) s += 2;
+      else if (w.indexOf("-") >= 0){
+        var parts = w.split("-").filter(function(p){ return !!p; });
+        if (parts.length && parts.every(function(p){ return toks.indexOf(p) >= 0; })) s += 2;
+      }
+    });
+    if (numStr && c.number != null && String(c.number).trim() === numStr) s += 3;
+    if (sizeStr && c.set && c.set.printedTotal != null && String(c.set.printedTotal) === sizeStr) s += 4;
+    return { card: c, score: s, idx: idx };
+  });
+  scored.sort(function(a, b){ return (b.score - a.score) || (a.idx - b.idx); });
+  if (numStr) scored = scored.filter(function(x){ return numberMatches(x.card.number, numStr); });
+  return scored;
+}
+function tryBandQueries(candidates, number, setSize, sourceLabel){
   var jobs = [];
   candidates.forEach(function(cand){
     var safe = cand.replace(/"/g, "").trim();
     if (!safe) return;
+    if (number && setSize) jobs.push({ q: 'name:"' + safe + '*" number:"' + number + '" set.printedTotal:' + setSize, cand: safe });
     if (number) jobs.push({ q: 'name:"' + safe + '*" number:"' + number + '"', cand: safe });
     jobs.push({ q: 'name:"' + safe + '*"', cand: safe });
   });
@@ -1046,8 +1118,10 @@ function tryBandQueries(candidates, number, sourceLabel){
     }
     apiFetch(jobs[i].q, 12).then(function(cards){
       if (!cards.length) return tryNext(i + 1);
+      var ranked = scoreResults(cards, candidates, number, setSize);
+      if (!ranked.length || ranked[0].score <= 0) return tryNext(i + 1);
       scanning = false;
-      handleMatch(cards, jobs[i].cand);
+      handleMatch(ranked.map(function(x){ return x.card; }), jobs[i].cand);
     }).catch(function(){ tryNext(i + 1); });
   })(0);
 }
@@ -1073,14 +1147,38 @@ function wholeImageIdentify(src, sourceLabel){
       }
       apiFetch(queries[i], 12).then(function(cards){
         if (!cards.length) return tryNext(i+1);
+        var ranked = scoreResults(cards, names, numMatch ? numMatch[1] : null);
+        if (!ranked.length || ranked[0].score <= 0) return tryNext(i+1);
         scanning = false;
-        handleMatch(cards, names[i]);
+        handleMatch(ranked.map(function(x){ return x.card; }), names[i]);
       }).catch(function(){ tryNext(i+1); });
     })(0);
   }).catch(function(){
     scanning = false;
     handleNoMatch("Reading failed on that " + sourceLabel + ". Try again or search manually below.");
   });
+}
+
+/* Read the printed "87/149" off the bottom strip: the collector number and
+   the set size after the slash. Handles leading zeros ("087/198"), secret
+   rares where the number tops the set size ("152/102"), and letter-prefixed
+   gallery numbers ("TG03/TG30" — the size keeps its digits, "30"). A bare
+   number with no slash still yields the number, just without a set size.
+   Returns null when nothing number-like is found. */
+function normalizePrintedNumber(tok){
+  tok = String(tok || "").trim().toUpperCase();
+  return /^\d+$/.test(tok) ? String(parseInt(tok, 10)) : tok;
+}
+function parsePrintedNumber(text){
+  if (!text) return null;
+  var pair = text.match(/([A-Za-z]{0,3}\d{1,3})\s*\/\s*([A-Za-z]{0,3}\d{1,3})/);
+  if (pair){
+    var sizeDigits = pair[2].replace(/[^0-9]/g, "");
+    return { number: normalizePrintedNumber(pair[1]), setSize: sizeDigits || null };
+  }
+  var bare = text.match(/(?:^|[^A-Za-z0-9])([A-Za-z]{0,3}\d{1,3})(?![0-9A-Za-z])/);
+  if (bare) return { number: normalizePrintedNumber(bare[1]), setSize: null };
+  return null;
 }
 
 function identifyCanvas(source, sourceLabel){
@@ -1101,16 +1199,17 @@ function identifyCanvas(source, sourceLabel){
     var bandText = (res && res.data && res.data.text) || "";
     var candidates = bandNameCandidates(bandText);
     if (!candidates.length){ wholeImageIdentify(src, sourceLabel); return; }
-    // 2) number strip: bottom 14%, same prep, for the collector number (e.g. 4/102)
+    // 2) number strip: bottom 14%, same prep, for the printed "4/102" —
+    // collector number plus set size when the slash pair reads cleanly
     var strip = null;
     try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
     var numRun = strip ? Tesseract.recognize(strip, "eng") : Promise.resolve(null);
     numRun.then(function(nres){
       var numText = (nres && nres.data && nres.data.text) || "";
-      var nm = numText.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
-      tryBandQueries(candidates, nm ? nm[1] : null, sourceLabel);
+      var parsed = parsePrintedNumber(numText);
+      tryBandQueries(candidates, parsed ? parsed.number : null, parsed ? parsed.setSize : null, sourceLabel);
     }).catch(function(){
-      tryBandQueries(candidates, null, sourceLabel);
+      tryBandQueries(candidates, null, null, sourceLabel);
     });
   }).catch(function(){
     wholeImageIdentify(src, sourceLabel);
@@ -1201,17 +1300,35 @@ $("photoInput").addEventListener("change", function(){
   var f = this.files && this.files[0];
   this.value = "";
   if (!f) return;
-  var img = new Image();
-  img.onload = function(){
-    var max = 1400, scale = Math.min(1, max / Math.max(img.width, img.height));
+  var src = URL.createObjectURL(f);
+  // Normalize EXIF orientation (camera-roll photos can be stored sideways),
+  // then downscale to max 1400px on the long edge and identify as before.
+  function drawSource(source, w, h){
+    var max = 1400, scale = Math.min(1, max / Math.max(w, h));
     var c = document.createElement("canvas");
-    c.width = Math.round(img.width*scale); c.height = Math.round(img.height*scale);
-    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-    URL.revokeObjectURL(img.src);
+    c.width = Math.round(w*scale); c.height = Math.round(h*scale);
+    c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(src);
     identifyCanvas(c, "photo");
-  };
-  img.onerror = function(){ setScanStatus("That image couldn't be opened. Try another photo.", true); };
-  img.src = URL.createObjectURL(f);
+  }
+  function loadWithImage(){
+    var img = new Image();
+    img.onload = function(){ drawSource(img, img.width, img.height); };
+    img.onerror = function(){ setScanStatus("That image couldn't be opened. Try another photo.", true); };
+    img.src = src;
+  }
+  var usedBitmap = false;
+  if (window.createImageBitmap){
+    try {
+      createImageBitmap(f, { imageOrientation: "from-image" }).then(function(bitmap){
+        usedBitmap = true;
+        drawSource(bitmap, bitmap.width, bitmap.height);
+        if (bitmap.close) bitmap.close();
+      }).catch(function(){ if (!usedBitmap) loadWithImage(); });
+    } catch(e){ loadWithImage(); }
+  } else {
+    loadWithImage();
+  }
 });
 
 /* mode toggle */
