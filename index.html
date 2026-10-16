@@ -192,6 +192,7 @@
   .switch .tk::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.15s}
   .switch input:checked + .tk{background:var(--accent)}
   .switch input:checked + .tk::after{left:23px}
+  .build-version{margin:18px 0 0;text-align:center;color:var(--ink2);font-family:var(--font-m);font-size:10.5px;letter-spacing:.02em}
 
   /* bottom nav */
   nav{position:fixed;left:0;right:0;bottom:0;z-index:40;background:var(--panel);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
@@ -360,6 +361,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
+      <p class="build-version">build 2026-10-16c</p>
     </section>
   </main>
 
@@ -615,6 +617,19 @@ function apiFetch(q, pageSize){
     if (!r.ok) throw new Error("Catalog returned " + r.status);
     return r.json();
   }).then(function(j){ return j.data || []; });
+}
+var API_QUERY_ATTEMPTS = 3;
+var API_RETRY_DELAY_MS = 1500;
+function apiFetchWithRetries(q, pageSize){
+  var attempt = 0;
+  function run(){
+    attempt += 1;
+    return apiFetch(q, pageSize).catch(function(err){
+      if (attempt >= API_QUERY_ATTEMPTS) throw err;
+      return new Promise(function(resolve){ setTimeout(resolve, API_RETRY_DELAY_MS); }).then(run);
+    });
+  }
+  return run();
 }
 function searchCatalog(term){
   term = term.trim();
@@ -1182,7 +1197,7 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan)
   var scoreNames = [correction.name].concat(candidates);
   (function tryNext(i){
     if (i >= jobs.length){ noCatalogMatch(candidates); return; }
-    apiFetch(jobs[i].q, 12).then(function(cards){
+    apiFetchWithRetries(jobs[i].q, 12).then(function(cards){
       if (!cards.length) return tryNext(i + 1);
       var ranked = scoreResults(cards, scoreNames, number, setSize);
       if (!ranked.length || ranked[0].score <= 0) return tryNext(i + 1);
@@ -1209,7 +1224,7 @@ function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForSc
       tryFuzzyQueries(candidates[0], candidates, number, setSize, nameIndexForScan);
       return;
     }
-    apiFetch(jobs[i].q, 12).then(function(cards){
+    apiFetchWithRetries(jobs[i].q, 12).then(function(cards){
       if (!cards.length) return tryNext(i + 1);
       var ranked = scoreResults(cards, candidates, number, setSize);
       if (!ranked.length || ranked[0].score <= 0) return tryNext(i + 1);
