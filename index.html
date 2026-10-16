@@ -106,6 +106,15 @@
   .flag-amber{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent-ink);white-space:nowrap}
   .research-note{font-size:12px;color:var(--ink2);margin-top:7px}
 
+  /* candidate picker ("Which card is this?") */
+  .pick-row{display:flex;gap:11px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;margin-top:9px;align-items:center;text-align:left;width:100%;color:var(--ink)}
+  .pick-row:active{background:var(--panel2)}
+  .pick-row img,.pick-row .img-fallback{width:46px;height:64px;flex:0 0 46px;aspect-ratio:auto;border-radius:5px;object-fit:contain;background:var(--panel2)}
+  .pick-row .pk-main{flex:1;min-width:0}
+  .pick-row .pk-nm{font-weight:600;font-size:14.5px;line-height:1.25}
+  .pick-row .pk-mt{font-size:12px;color:var(--ink2);margin-top:1px}
+  .pick-row .pk-pr{font-family:var(--font-m);font-weight:600;font-size:13px;color:var(--accent-ink);white-space:nowrap}
+
   /* detail sheet */
   .sheet-veil{position:fixed;inset:0;background:rgba(8,9,10,.55);z-index:50;display:none;align-items:flex-end;justify-content:center}
   .sheet-veil.on{display:flex}
@@ -367,7 +376,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16l</p>
+      <p class="build-version">build 2026-10-16m</p>
     </section>
   </main>
 
@@ -420,6 +429,22 @@
       </button>
       <div class="alts" id="dAlts" style="display:none"></div>
     </div>
+  </div>
+</div>
+
+<!-- "Which card is this?" candidate picker -->
+<div class="sheet-veil" id="pickVeil">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Which card is this?">
+    <div class="sheet-head">
+      <div style="min-width:0">
+        <h3>Which card is this?</h3>
+        <div class="mt" id="pickNote"></div>
+      </div>
+      <button class="x-btn" id="pickClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="pickScannedPhoto"></div>
+    <div id="pickList"></div>
+    <button class="btn block" id="pickNone" style="margin-top:14px">None of these — search manually</button>
   </div>
 </div>
 
@@ -840,6 +865,52 @@ $("dNotCard").addEventListener("click", function(){
     a.innerHTML = '<div style="grid-column:1/-1;font-size:13px;color:var(--ink2)">No other matches from that read. Close this and use manual search with the card name or number (like 4/102).</div>';
   }
 });
+
+/* ================= candidate picker =================
+   When the ±1 digit-confusion expansion brings back several cards and the
+   name read doesn't clearly separate them, guessing wrong strands the user
+   on the wrong card's detail sheet. Instead, show the candidates and let
+   them tap the card they actually scanned. Tapping a row opens that card's
+   detail sheet with the full candidate list still attached, so "Not this
+   card?" keeps working from there too. */
+var pickCtx = null; // {cards, scanThumb}
+function openCandidatePicker(cards, readName, scanThumb){
+  pickCtx = { cards: cards, scanThumb: scanThumb || null };
+  $("pickNote").innerHTML = "Read <b>" + esc(readName) + "</b>, but a few cards sit one digit apart and the name doesn't settle it. Tap the one you scanned.";
+  $("pickScannedPhoto").innerHTML = scannedPhotoHtml(scanThumb, false);
+  $("pickList").innerHTML = cards.map(function(c, i){
+    var price = null, keys = printingKeys(c);
+    for (var k = 0; k < keys.length; k++){
+      var p = c.tcgplayer.prices[keys[k]];
+      if (p && p.market != null){ price = p.market; break; }
+    }
+    return '<button class="pick-row" data-pick="'+i+'">' + cardImg(c) +
+      '<span class="pk-main"><span class="pk-nm">'+esc(c.name||"")+'</span><br><span class="pk-mt">'+esc(c.set&&c.set.name||"")+' &middot; #'+esc(c.number||"")+'</span></span>' +
+      (price != null ? '<span class="pk-pr">'+money(price)+'</span>' : "") +
+      '<span class="cond-chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></button>';
+  }).join("");
+  $("pickList").querySelectorAll("[data-pick]").forEach(function(b){
+    b.addEventListener("click", function(){
+      var chosen = pickCtx.cards[Number(b.getAttribute("data-pick"))];
+      var all = pickCtx.cards, thumb = pickCtx.scanThumb;
+      closeCandidatePicker();
+      openDetail(chosen, { candidates: all, scanThumb: thumb });
+    });
+  });
+  $("pickVeil").classList.add("on");
+}
+function closeCandidatePicker(){ $("pickVeil").classList.remove("on"); pickCtx = null; }
+$("pickClose").addEventListener("click", closeCandidatePicker);
+$("pickVeil").addEventListener("click", function(e){ if (e.target===this) closeCandidatePicker(); });
+$("pickNone").addEventListener("click", function(){ closeCandidatePicker(); surfaceManualSearch(); });
+/* Decisive = the top name score is a real signal (above zero) and at least
+   double the runner-up's. Anything less — a tie, a near-tie, or a name read
+   so garbled nothing scored — goes to the picker. */
+function nameScoreDecisive(scored){
+  if (!scored || scored.length < 2) return true;
+  var top = scored[0].score || 0, second = scored[1].score || 0;
+  return top > 0 && top >= second * 2;
+}
 
 /* ================= quantity stepper ================= */
 var qtyCtx = null; // {cond, price}
@@ -1387,9 +1458,12 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan,
    number query returns results, the neighboring numbers (121 and 123) are
    queried with the same set size too and merged in before name ranking —
    the name score then puts the true card first ("Dug" matches "Dugtrio",
-   not "Diglett"), and the neighbors ride along as "Not this card?"
-   alternatives. The expansion only fires when the exact query hit, so a
-   bad number read never triples the query count. */
+   not "Diglett"). When the name score doesn't decisively separate the
+   merged candidates, handleMatch shows the "Which card is this?" picker
+   instead of auto-opening the top card; a decisive winner auto-opens with
+   the rest riding along as "Not this card?" alternatives. The expansion
+   only fires when the exact query hit, so a bad number read never triples
+   the query count. */
 function commonPrefixLen(a, b){
   var n = Math.min(a.length, b.length), i = 0;
   while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
@@ -1471,7 +1545,7 @@ function tryNumberFirstQueries(number, setSize, candidates, onMiss, scanThumb){
           return (ea - eb) || (a.idx - b.idx);
         });
       }
-      handleMatch(ranked.map(function(x){ return x.card; }), readLabel, null, scanThumb);
+      handleMatch(ranked.map(function(x){ return x.card; }), readLabel, null, scanThumb, ranked);
     }
   }).catch(function(){ onMiss(); });
 }
@@ -1702,7 +1776,7 @@ function identifyCanvas(source, sourceLabel){
   });
 }
 
-function handleMatch(cards, readName, correction, scanThumb){
+function handleMatch(cards, readName, correction, scanThumb, scored){
   if (correction){
     setScanStatus('Read <b>"' + esc(correction.raw) + '"</b> — matched <b>"' + esc(correction.corrected) + '"</b>. Confirm it\'s the right card.');
   } else {
@@ -1730,6 +1804,15 @@ function handleMatch(cards, readName, correction, scanThumb){
     }
     renderQueue();
   } else {
+    /* Several candidates from the digit-confusion expansion and no decisive
+       name winner: don't auto-open a guess — let the user pick. The batch
+       path above never lands here; queued items already ask for a confirm
+       tap instead. */
+    if (cards.length > 1 && !nameScoreDecisive(scored)){
+      setScanStatus("Read <b>" + esc(readName) + "</b> — a few close matches. Pick the right one.");
+      openCandidatePicker(cards, readName, scanThumb);
+      return;
+    }
     openDetail(best, { candidates: cards, scanThumb: scanThumb });
   }
 }
