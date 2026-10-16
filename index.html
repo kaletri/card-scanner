@@ -366,7 +366,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16d</p>
+      <p class="build-version">build 2026-10-16e</p>
     </section>
   </main>
 
@@ -1410,8 +1410,8 @@ function identifyCanvas(source, sourceLabel){
   var strip = null;
   try { band = ocrPrepBand(src, 0, 0.16); } catch (e) { band = null; }
   try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
-  var bandRun = band ? ocrRecognize(band, 7) : Promise.reject(new Error("band prep failed"));
-  var numRun = strip ? ocrRecognize(strip, 7).catch(function(){ return null; }) : Promise.resolve(null);
+  var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
+  var numRun = strip ? ocrRecognize(strip, 3).catch(function(){ return null; }) : Promise.resolve(null);
   Promise.all([bandRun, numRun]).then(function(reads){
     var bandText = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var candidates = bandNameCandidates(bandText);
