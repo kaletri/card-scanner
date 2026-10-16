@@ -114,6 +114,11 @@
   @media (prefers-reduced-motion: reduce){ .sheet{animation:none} .spinner{animation-duration:2s} }
   .sheet-head{display:flex;gap:13px}
   .sheet-head img,.sheet-head .img-fallback{width:96px;height:134px;flex:0 0 96px;border-radius:8px;border:1px solid var(--line)}
+  .scan-photo{display:flex;align-items:center;gap:10px;margin-top:12px;padding:8px 10px;background:var(--panel2);border-radius:12px}
+  .scan-photo img{width:56px;height:78px;flex:0 0 56px;object-fit:contain;border-radius:6px;background:#0b0c0d}
+  .scan-photo .scan-photo-label{font-size:12px;color:var(--ink2)}
+  .scan-photo .scan-photo-label b{display:block;color:var(--ink);font-size:13px}
+  .queue-item img.scan-source-thumb{object-fit:cover;background:#0b0c0d}
   .sheet-head h3{font-family:var(--font-d);font-size:20px;font-weight:800;margin:0 0 3px;line-height:1.15}
   .sheet-head .mt{font-size:12.5px;color:var(--ink2);line-height:1.45}
   .sheet-head .mt b{color:var(--ink)}
@@ -361,7 +366,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16c</p>
+      <p class="build-version">build 2026-10-16d</p>
     </section>
   </main>
 
@@ -388,6 +393,7 @@
       <button class="x-btn" id="dClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
 
+    <div id="dScannedPhoto"></div>
     <div id="dScanNote"></div>
 
     <div class="field-lbl">Printing</div>
@@ -608,15 +614,24 @@ document.addEventListener("error", function(e){
 
 /* ================= Pokemon TCG API ================= */
 var API = "https://api.pokemontcg.io/v2/cards";
+var API_FETCH_TIMEOUT_MS = 12000;
 function apiFetch(q, pageSize){
   var url = API + "?q=" + encodeURIComponent(q) + "&pageSize=" + (pageSize||24) +
             "&select=id,name,number,rarity,set,images,tcgplayer&orderBy=set.releaseDate";
   var headers = {};
   if (state.settings.apiKey) headers["X-Api-Key"] = state.settings.apiKey;
-  return fetch(url, { headers: headers }).then(function(r){
+  var controller = new AbortController();
+  var timer = setTimeout(function(){ controller.abort(); }, API_FETCH_TIMEOUT_MS);
+  return fetch(url, { headers: headers, signal: controller.signal }).then(function(r){
     if (!r.ok) throw new Error("Catalog returned " + r.status);
     return r.json();
-  }).then(function(j){ return j.data || []; });
+  }).then(function(j){
+    clearTimeout(timer);
+    return j.data || [];
+  }, function(err){
+    clearTimeout(timer);
+    throw err;
+  });
 }
 var API_QUERY_ATTEMPTS = 3;
 var API_RETRY_DELAY_MS = 1500;
@@ -696,7 +711,7 @@ $("binderSave").addEventListener("click", function(){
 });
 
 /* ================= card detail sheet ================= */
-var detail = null; // {card, candidates, printing, language, snapshotAt, queueId|null}
+var detail = null; // {card, candidates, printing, language, snapshotAt, queueId|null, scanThumb|null}
 function openDetail(card, opts){
   opts = opts || {};
   var keys = printingKeys(card);
@@ -707,7 +722,8 @@ function openDetail(card, opts){
     holoPattern: "Standard",
     language: "English",
     snapshotAt: Date.now(),
-    queueId: opts.queueId || null
+    queueId: opts.queueId || null,
+    scanThumb: opts.scanThumb || null
   };
   renderDetail();
   $("detailVeil").classList.add("on");
@@ -724,6 +740,7 @@ function renderDetail(){
   var setName = c.set && c.set.name ? c.set.name : "";
   $("dMeta").innerHTML = esc(setName) + (c.number ? ' &middot; <b>#'+esc(c.number)+"</b>" : "");
   $("dRarity").innerHTML = c.rarity ? "Rarity: <b>"+esc(c.rarity)+"</b>" : "";
+  $("dScannedPhoto").innerHTML = scannedPhotoHtml(detail.scanThumb, false);
   var note = $("dScanNote");
   if (detail.queueId){
     note.innerHTML = '<div class="snap-note" style="background:var(--warn-soft);color:var(--warn);border-radius:9px;padding:8px 11px;margin-top:12px">From the batch queue — double-check this is the right card before confirming.</div>';
@@ -1039,6 +1056,21 @@ function downscaleForOcr(source){
   c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
   return c;
 }
+function scanThumbFromSource(source){
+  if (!source || !source.width || !source.height) return null;
+  var max = 240;
+  var scale = Math.min(1, max / Math.max(source.width, source.height));
+  var c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(source.width * scale));
+  c.height = Math.max(1, Math.round(source.height * scale));
+  c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
+  try { return c.toDataURL("image/jpeg", 0.72); } catch (e) { return null; }
+}
+function scannedPhotoHtml(src, compact){
+  if (!src) return "";
+  if (compact) return '<img class="scan-source-thumb" src="' + esc(src) + '" alt="Scanned photo">';
+  return '<div class="scan-photo"><img src="' + esc(src) + '" alt="Scanned photo"><div class="scan-photo-label"><b>Scanned photo</b>Image used for this identification</div></div>';
+}
 function ocrPrepBand(source, yFrac, hFrac){
   // crop a horizontal band, upscale 2x, then grayscale + contrast-stretch per pixel
   // (no ctx.filter — iOS support is inconsistent)
@@ -1181,16 +1213,24 @@ function queryJobsForName(name, number, setSize){
   var safe = String(name || "").replace(/"/g, "").trim();
   var jobs = [];
   if (!safe) return jobs;
-  if (number && setSize) jobs.push({ q:'name:"' + safe + '*" number:"' + number + '" set.printedTotal:' + setSize, cand:safe });
-  if (number) jobs.push({ q:'name:"' + safe + '*" number:"' + number + '"', cand:safe });
-  jobs.push({ q:'name:"' + safe + '*"', cand:safe });
+  if (number && setSize) jobs.push({ q:'name:"' + safe + '*" number:"' + number + '" set.printedTotal:' + setSize, cand:safe, tier:"number-set" });
+  if (number) jobs.push({ q:'name:"' + safe + '*" number:"' + number + '"', cand:safe, tier:"number" });
+  jobs.push({ q:'name:"' + safe + '*"', cand:safe, tier:"name" });
   return jobs;
+}
+function nextQueryIndex(jobs, i, returnedCards){
+  var next = i + 1;
+  if (returnedCards && jobs[i] && jobs[i].tier === "number-set" &&
+      jobs[next] && jobs[next].tier === "number" && jobs[next].cand === jobs[i].cand){
+    next += 1;
+  }
+  return next;
 }
 function noCatalogMatch(candidates){
   scanning = false;
   handleNoMatch("Read “" + esc(candidates[0]) + "” but found no catalog match. Check the spelling in manual search below.");
 }
-function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan){
+function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan, scanThumb){
   var correction = closestCatalogName(rawRead, nameIndexForScan);
   if (!correction){ noCatalogMatch(candidates); return; }
   var jobs = queryJobsForName(correction.name, number, setSize);
@@ -1198,18 +1238,19 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan)
   (function tryNext(i){
     if (i >= jobs.length){ noCatalogMatch(candidates); return; }
     apiFetchWithRetries(jobs[i].q, 12).then(function(cards){
-      if (!cards.length) return tryNext(i + 1);
+      var next = nextQueryIndex(jobs, i, cards.length > 0);
+      if (!cards.length) return tryNext(next);
       var ranked = scoreResults(cards, scoreNames, number, setSize);
-      if (!ranked.length || ranked[0].score <= 0) return tryNext(i + 1);
+      if (!ranked.length || ranked[0].score <= 0) return tryNext(next);
       scanning = false;
       handleMatch(ranked.map(function(x){ return x.card; }), correction.name, {
         raw:rawRead,
         corrected:correction.name
-      });
+      }, scanThumb);
     }).catch(function(){ tryNext(i + 1); });
   })(0);
 }
-function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan){
+function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan, scanThumb){
   var jobs = [];
   candidates.forEach(function(cand){
     jobs = jobs.concat(queryJobsForName(cand, number, setSize));
@@ -1221,19 +1262,20 @@ function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForSc
   }
   (function tryNext(i){
     if (i >= jobs.length){
-      tryFuzzyQueries(candidates[0], candidates, number, setSize, nameIndexForScan);
+      tryFuzzyQueries(candidates[0], candidates, number, setSize, nameIndexForScan, scanThumb);
       return;
     }
     apiFetchWithRetries(jobs[i].q, 12).then(function(cards){
-      if (!cards.length) return tryNext(i + 1);
+      var next = nextQueryIndex(jobs, i, cards.length > 0);
+      if (!cards.length) return tryNext(next);
       var ranked = scoreResults(cards, candidates, number, setSize);
-      if (!ranked.length || ranked[0].score <= 0) return tryNext(i + 1);
+      if (!ranked.length || ranked[0].score <= 0) return tryNext(next);
       scanning = false;
-      handleMatch(ranked.map(function(x){ return x.card; }), jobs[i].cand);
+      handleMatch(ranked.map(function(x){ return x.card; }), jobs[i].cand, null, scanThumb);
     }).catch(function(){ tryNext(i + 1); });
   })(0);
 }
-function wholeImageIdentify(src, sourceLabel, nameIndexForScan){
+function wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb){
   ocrRecognize(src).then(function(res){
     var text = (res && res.data && res.data.text) || "";
     var names = ocrCandidates(text);
@@ -1250,7 +1292,7 @@ function wholeImageIdentify(src, sourceLabel, nameIndexForScan){
     // try reads in order until one hits
     (function tryNext(i){
       if (i >= queries.length){
-        tryFuzzyQueries(names[0], names, parsed ? parsed.number : null, parsed ? parsed.setSize : null, nameIndexForScan);
+        tryFuzzyQueries(names[0], names, parsed ? parsed.number : null, parsed ? parsed.setSize : null, nameIndexForScan, scanThumb);
         return;
       }
       apiFetch(queries[i], 12).then(function(cards){
@@ -1258,7 +1300,7 @@ function wholeImageIdentify(src, sourceLabel, nameIndexForScan){
         var ranked = scoreResults(cards, names, numMatch ? numMatch[1] : null);
         if (!ranked.length || ranked[0].score <= 0) return tryNext(i+1);
         scanning = false;
-        handleMatch(ranked.map(function(x){ return x.card; }), names[i]);
+        handleMatch(ranked.map(function(x){ return x.card; }), names[i], null, scanThumb);
       }).catch(function(){ tryNext(i+1); });
     })(0);
   }).catch(function(){
@@ -1297,7 +1339,22 @@ function parsePrintedNumber(text){
    notes the miss in the queue and moves on to the next photo. */
 var OCR_TIMEOUT_MS = 120000;
 var OCR_FAIL_MSG = "Couldn't read the card text. Try brighter, even lighting with the card filling the frame — or search the name manually below.";
-function ocrRecognize(image){
+function startOcrCall(image, psm){
+  if (!psm) return Tesseract.recognize(image, "eng");
+  var worker = null;
+  return Tesseract.createWorker("eng").then(function(w){
+    worker = w;
+    return worker.setParameters({ tessedit_pageseg_mode: String(psm) });
+  }).then(function(){
+    return worker.recognize(image);
+  }).then(function(res){
+    return worker.terminate().then(function(){ return res; }, function(){ return res; });
+  }, function(err){
+    if (!worker) throw err;
+    return worker.terminate().then(function(){ throw err; }, function(){ throw err; });
+  });
+}
+function ocrRecognize(image, psm){
   return new Promise(function(resolve, reject){
     var settled = false;
     var timer = setTimeout(function(){
@@ -1306,7 +1363,7 @@ function ocrRecognize(image){
       reject(new Error("OCR timed out"));
     }, OCR_TIMEOUT_MS);
     var call;
-    try { call = Tesseract.recognize(image, "eng"); }
+    try { call = startOcrCall(image, psm); }
     catch (e) { settled = true; clearTimeout(timer); reject(e); return; }
     Promise.resolve(call).then(function(res){
       if (settled) return; /* timed out and abandoned — ignore the late result */
@@ -1345,34 +1402,29 @@ function identifyCanvas(source, sourceLabel){
     return;
   }
   var src = downscaleForOcr(source);
+  var scanThumb = scanThumbFromSource(src);
   /* The embedded index is ready before any scan can begin. */
   var nameIndexForScan = cardNameIndex;
-  // 1) name band: top 16% of the card, prepped for OCR
+  // Read the independent name band and collector-number strip in parallel.
   var band = null;
+  var strip = null;
   try { band = ocrPrepBand(src, 0, 0.16); } catch (e) { band = null; }
-  var bandRun = band ? ocrRecognize(band) : Promise.reject(new Error("band prep failed"));
-  bandRun.then(function(res){
-    var bandText = (res && res.data && res.data.text) || "";
+  try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
+  var bandRun = band ? ocrRecognize(band, 7) : Promise.reject(new Error("band prep failed"));
+  var numRun = strip ? ocrRecognize(strip, 7).catch(function(){ return null; }) : Promise.resolve(null);
+  Promise.all([bandRun, numRun]).then(function(reads){
+    var bandText = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var candidates = bandNameCandidates(bandText);
-    if (!candidates.length){ wholeImageIdentify(src, sourceLabel, nameIndexForScan); return; }
-    // 2) number strip: bottom 14%, same prep, for the printed "4/102" —
-    // collector number plus set size when the slash pair reads cleanly
-    var strip = null;
-    try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
-    var numRun = strip ? ocrRecognize(strip) : Promise.resolve(null);
-    numRun.then(function(nres){
-      var numText = (nres && nres.data && nres.data.text) || "";
-      var parsed = parsePrintedNumber(numText);
-      tryBandQueries(candidates, parsed ? parsed.number : null, parsed ? parsed.setSize : null, sourceLabel, nameIndexForScan);
-    }).catch(function(){
-      tryBandQueries(candidates, null, null, sourceLabel, nameIndexForScan);
-    });
+    if (!candidates.length){ wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb); return; }
+    var numText = (reads[1] && reads[1].data && reads[1].data.text) || "";
+    var parsed = parsePrintedNumber(numText);
+    tryBandQueries(candidates, parsed ? parsed.number : null, parsed ? parsed.setSize : null, sourceLabel, nameIndexForScan, scanThumb);
   }).catch(function(){
-    wholeImageIdentify(src, sourceLabel, nameIndexForScan);
+    wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb);
   });
 }
 
-function handleMatch(cards, readName, correction){
+function handleMatch(cards, readName, correction, scanThumb){
   if (correction){
     setScanStatus('Read <b>"' + esc(correction.raw) + '"</b> — matched <b>"' + esc(correction.corrected) + '"</b>. Confirm it\'s the right card.');
   } else {
@@ -1392,15 +1444,15 @@ function handleMatch(cards, readName, correction){
         addRow(best, { printing: pk, language: "English", condition: condName, price: price, worthItEach: worthIt(price), qty: 1 });
         toast("Auto-added " + best.name + " (" + cond.ab + ")");
       } else {
-        pushQueue(best, cards, true, "No market price — needs a look");
+        pushQueue(best, cards, true, "No market price — needs a look", scanThumb);
       }
     } else {
-      pushQueue(best, cards, lowConf, lowConf ? "Several close matches — confirm" : "");
+      pushQueue(best, cards, lowConf, lowConf ? "Several close matches — confirm" : "", scanThumb);
       toast("Queued: " + best.name);
     }
     renderQueue();
   } else {
-    openDetail(best, { candidates: cards });
+    openDetail(best, { candidates: cards, scanThumb: scanThumb });
   }
 }
 function handleNoMatch(msg){
@@ -1410,8 +1462,8 @@ function handleNoMatch(msg){
     renderQueue();
   }
 }
-function pushQueue(card, candidates, flagged, note){
-  state.queue.push({ id: uid(), card: card, candidates: candidates || [], flagged: !!flagged, note: note || "" });
+function pushQueue(card, candidates, flagged, note, scanThumb){
+  state.queue.push({ id: uid(), card: card, candidates: candidates || [], flagged: !!flagged, note: note || "", scanThumb: scanThumb || null });
 }
 function removeFromQueue(id){
   state.queue = state.queue.filter(function(q){ return q.id !== id; });
@@ -1427,8 +1479,8 @@ function renderQueue(){
     if (!q.card){
       return '<button class="queue-item" data-q="'+q.id+'"><span class="img-fallback">?</span><span class="qi-main"><span class="qi-nm">Unread card</span><br><span class="qi-mt">'+esc(q.note)+'</span></span><span class="flag">CHECK</span></button>';
     }
-    return '<button class="queue-item" data-q="'+q.id+'">'+cardImg(q.card)+
-      '<span class="qi-main"><span class="qi-nm">'+esc(q.card.name)+'</span><br><span class="qi-mt">'+esc(q.card.set&&q.card.set.name||"")+' #'+esc(q.card.number||"")+'</span>'+(q.note?'<br><span class="qi-mt">'+esc(q.note)+'</span>':"")+'</span>'+
+    return '<button class="queue-item" data-q="'+q.id+'">'+(q.scanThumb ? scannedPhotoHtml(q.scanThumb, true) : cardImg(q.card))+
+      '<span class="qi-main"><span class="qi-nm">'+esc(q.card.name)+'</span><br><span class="qi-mt">'+esc(q.card.set&&q.card.set.name||"")+' #'+esc(q.card.number||"")+'</span>'+(q.scanThumb?'<br><span class="qi-mt">Scanned photo</span>':"")+(q.note?'<br><span class="qi-mt">'+esc(q.note)+'</span>':"")+'</span>'+ 
       (q.flagged ? '<span class="flag">CHECK</span>' : '<span class="flag ok">TAP TO GRADE</span>')+'</button>';
   }).join("");
   $("queueList").querySelectorAll("[data-q]").forEach(function(b){
@@ -1442,7 +1494,7 @@ function renderQueue(){
         showView("scan");
         return;
       }
-      openDetail(q.card, { candidates: q.candidates.length>1 ? q.candidates : null, queueId: q.id });
+      openDetail(q.card, { candidates: q.candidates.length>1 ? q.candidates : null, queueId: q.id, scanThumb: q.scanThumb || null });
     });
   });
 }
