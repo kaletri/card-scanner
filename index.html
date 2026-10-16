@@ -870,16 +870,113 @@ function ocrCandidates(text){
   return out.slice(0, 4);
 }
 
-function identifyCanvas(source, sourceLabel){
-  if (scanning) return;
-  scanning = true;
-  setScanStatus('<span class="spinner"></span>Reading the card name…');
-  if (typeof Tesseract === "undefined"){
+/* ---- OCR pipeline: name band + number strip first, whole image as fallback ---- */
+function downscaleForOcr(source){
+  var max = 1400;
+  var longest = Math.max(source.width, source.height);
+  if (!longest || longest <= max) return source;
+  var scale = max / longest;
+  var c = document.createElement("canvas");
+  c.width = Math.round(source.width * scale);
+  c.height = Math.round(source.height * scale);
+  c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
+  return c;
+}
+function ocrPrepBand(source, yFrac, hFrac){
+  // crop a horizontal band, upscale 2x, then grayscale + contrast-stretch per pixel
+  // (no ctx.filter — iOS support is inconsistent)
+  var sw = source.width, sh = source.height;
+  var sy = Math.min(sh - 1, Math.round(sh * yFrac));
+  var bh = Math.max(1, Math.round(sh * hFrac));
+  var c = document.createElement("canvas");
+  c.width = sw * 2;
+  c.height = bh * 2;
+  var ctx = c.getContext("2d");
+  ctx.drawImage(source, 0, sy, sw, bh, 0, 0, c.width, c.height);
+  var img = ctx.getImageData(0, 0, c.width, c.height);
+  var d = img.data;
+  for (var i = 0; i < d.length; i += 4){
+    var g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    var v = (g - 128) * 1.5 + 128;
+    d[i] = d[i + 1] = d[i + 2] = v < 0 ? 0 : (v > 255 ? 255 : v);
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+function bandNameCandidates(text){
+  var wordRe = /[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.\-]*/g;
+  function isCap(raw){
+    if (!raw || raw.length < 3) return false;
+    var ch = raw.charAt(0);
+    return ch === ch.toUpperCase() && ch !== ch.toLowerCase();
+  }
+  function bare(w){ return w.replace(/\.+$/, ""); }
+  var counts = {}, display = {}, firstSeen = {}, seq = 0;
+  var pairs = [], pairSeen = {};
+  var lines = text.split(/\n/);
+  lines.forEach(function(line){
+    var toks = line.match(wordRe) || [];
+    toks.forEach(function(raw){
+      if (!isCap(raw)) return;
+      var w = bare(raw);
+      if (w.length < 2) return;
+      var key = w.toLowerCase();
+      if (!(key in counts)){ counts[key] = 0; display[key] = w; firstSeen[key] = seq++; }
+      counts[key]++;
+    });
+    for (var i = 0; i + 1 < toks.length; i++){
+      if (isCap(toks[i]) && isCap(toks[i + 1])){
+        var pair = bare(toks[i] + " " + toks[i + 1]);
+        if (pair.length >= 3 && !pairSeen[pair.toLowerCase()]){
+          pairSeen[pair.toLowerCase()] = 1;
+          pairs.push(pair);
+        }
+      }
+    }
+  });
+  var singles = Object.keys(counts).sort(function(a, b){
+    if (counts[b] !== counts[a]) return counts[b] - counts[a];
+    if (display[b].length !== display[a].length) return display[b].length - display[a].length;
+    return firstSeen[a] - firstSeen[b];
+  }).map(function(k){ return display[k]; });
+  var out = [], seen = {};
+  function pushCand(c){
+    var k = c.toLowerCase();
+    if (c.length >= 3 && !seen[k]){ seen[k] = 1; out.push(c); }
+  }
+  singles.forEach(pushCand);
+  pairs.forEach(pushCand);
+  lines.forEach(function(line){ pushCand(cleanName(line)); });
+  return out.slice(0, 8);
+}
+function tryBandQueries(candidates, number, sourceLabel){
+  var jobs = [];
+  candidates.forEach(function(cand){
+    var safe = cand.replace(/"/g, "").trim();
+    if (!safe) return;
+    if (number) jobs.push({ q: 'name:"' + safe + '*" number:"' + number + '"', cand: safe });
+    jobs.push({ q: 'name:"' + safe + '*"', cand: safe });
+  });
+  if (!jobs.length){
     scanning = false;
-    setScanStatus("The card reader couldn't load. Check your connection, or use manual search below.", true);
+    handleNoMatch("Couldn't read a name off that " + sourceLabel + ". Try steadier light, fill the frame with the card top — or search manually below.");
     return;
   }
-  Tesseract.recognize(source, "eng").then(function(res){
+  (function tryNext(i){
+    if (i >= jobs.length){
+      scanning = false;
+      handleNoMatch("Read “" + esc(candidates[0]) + "” but found no catalog match. Check the spelling in manual search below.");
+      return;
+    }
+    apiFetch(jobs[i].q, 12).then(function(cards){
+      if (!cards.length) return tryNext(i + 1);
+      scanning = false;
+      handleMatch(cards, jobs[i].cand);
+    }).catch(function(){ tryNext(i + 1); });
+  })(0);
+}
+function wholeImageIdentify(src, sourceLabel){
+  Tesseract.recognize(src, "eng").then(function(res){
     var text = (res && res.data && res.data.text) || "";
     var names = ocrCandidates(text);
     var numMatch = text.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
@@ -907,6 +1004,40 @@ function identifyCanvas(source, sourceLabel){
   }).catch(function(){
     scanning = false;
     handleNoMatch("Reading failed on that " + sourceLabel + ". Try again or search manually below.");
+  });
+}
+
+function identifyCanvas(source, sourceLabel){
+  if (scanning) return;
+  scanning = true;
+  setScanStatus('<span class="spinner"></span>Reading the card name…');
+  if (typeof Tesseract === "undefined"){
+    scanning = false;
+    setScanStatus("The card reader couldn't load. Check your connection, or use manual search below.", true);
+    return;
+  }
+  var src = downscaleForOcr(source);
+  // 1) name band: top 16% of the card, prepped for OCR
+  var band = null;
+  try { band = ocrPrepBand(src, 0, 0.16); } catch (e) { band = null; }
+  var bandRun = band ? Tesseract.recognize(band, "eng") : Promise.reject(new Error("band prep failed"));
+  bandRun.then(function(res){
+    var bandText = (res && res.data && res.data.text) || "";
+    var candidates = bandNameCandidates(bandText);
+    if (!candidates.length){ wholeImageIdentify(src, sourceLabel); return; }
+    // 2) number strip: bottom 14%, same prep, for the collector number (e.g. 4/102)
+    var strip = null;
+    try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
+    var numRun = strip ? Tesseract.recognize(strip, "eng") : Promise.resolve(null);
+    numRun.then(function(nres){
+      var numText = (nres && nres.data && nres.data.text) || "";
+      var nm = numText.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
+      tryBandQueries(candidates, nm ? nm[1] : null, sourceLabel);
+    }).catch(function(){
+      tryBandQueries(candidates, null, sourceLabel);
+    });
+  }).catch(function(){
+    wholeImageIdentify(src, sourceLabel);
   });
 }
 
