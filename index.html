@@ -1,0 +1,1173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<link rel="icon" href="data:," />
+<title>Card Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#f6f6f3; --panel:#ffffff; --panel2:#efefea; --ink:#17191d; --ink2:#5b6068;
+    --line:#e2e2da; --accent:#c47b12; --accent-ink:#8a5607; --accent-soft:#f7e8cf;
+    --good:#2e7d4f; --good-soft:#e0f0e6; --warn:#b3261e; --warn-soft:#fbe7e4;
+    --chip:#eceae2; --shadow:0 8px 28px rgba(23,25,29,.10);
+    --radius:14px;
+    --font-d:"Archivo",system-ui,sans-serif;
+    --font-b:"Inter",system-ui,-apple-system,sans-serif;
+    --font-m:"IBM Plex Mono",ui-monospace,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1113; --panel:#181b1e; --panel2:#1f2327; --ink:#eceee9; --ink2:#9aa0a3;
+      --line:#2b2f33; --accent:#eda93c; --accent-ink:#f5c56b; --accent-soft:#3a2c12;
+      --good:#5cb585; --good-soft:#173527; --warn:#e0736a; --warn-soft:#3d1d1a;
+      --chip:#26292d; --shadow:0 8px 28px rgba(0,0,0,.45);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--font-b);font-size:15px;line-height:1.45;-webkit-tap-highlight-color:transparent}
+  button{font-family:inherit;cursor:pointer}
+  input,select{font-family:inherit}
+  .app{max-width:600px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
+
+  /* ---------- header / binder bar ---------- */
+  header{position:sticky;top:0;z-index:30;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px 10px}
+  .binder-row{display:flex;gap:8px;align-items:stretch}
+  .binder-pick{flex:1;display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:9px 12px;min-width:0}
+  .binder-pick .lbl{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);white-space:nowrap}
+  .binder-pick select{flex:1;min-width:0;border:none;background:transparent;color:var(--ink);font-size:15px;font-weight:600;outline:none;appearance:none}
+  .icon-btn{width:44px;flex:0 0 44px;display:grid;place-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;color:var(--ink)}
+  .icon-btn svg{width:20px;height:20px}
+  .binder-meta{display:flex;justify-content:space-between;gap:8px;margin-top:7px;font-size:12px;color:var(--ink2);padding:0 2px}
+  .binder-meta b{color:var(--ink);font-family:var(--font-m);font-weight:600}
+
+  /* ---------- views ---------- */
+  main{flex:1;padding:16px 14px 110px;width:100%}
+  .view{display:none}
+  .view.on{display:block}
+  h2{font-family:var(--font-d);font-size:21px;font-weight:800;letter-spacing:-.01em;margin:2px 0 4px}
+  .sub{color:var(--ink2);font-size:13.5px;margin:0 0 14px}
+  .card-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+
+  /* mode toggle */
+  .seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:3px;gap:3px}
+  .seg button{flex:1;border:none;background:transparent;color:var(--ink2);font-weight:600;font-size:13.5px;padding:9px 6px;border-radius:9px}
+  .seg button.on{background:var(--panel);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.10)}
+
+  /* viewfinder */
+  .finder{margin-top:14px;border-radius:18px;overflow:hidden;background:#0b0c0d;position:relative;aspect-ratio:4/4.6;max-height:430px;width:100%}
+  .finder video{width:100%;height:100%;object-fit:cover;display:block}
+  .finder .frame{position:absolute;inset:9% 11%;border:2px solid rgba(255,255,255,.85);border-radius:14px;box-shadow:0 0 0 999px rgba(5,6,7,.42);pointer-events:none}
+  .finder .frame::after{content:"FIT CARD INSIDE FRAME";position:absolute;left:0;right:0;bottom:-26px;text-align:center;font-size:10px;letter-spacing:.14em;color:rgba(255,255,255,.75);font-weight:600}
+  .finder .hint{position:absolute;inset:0;display:grid;place-items:center;color:#c9cdd2;text-align:center;padding:24px;font-size:13.5px}
+  .finder .hint svg{width:44px;height:44px;margin-bottom:10px;opacity:.8}
+  .batch-count{position:absolute;top:10px;right:10px;background:rgba(10,10,10,.72);color:#ffd98a;font-family:var(--font-m);font-size:12px;padding:5px 10px;border-radius:99px}
+
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-weight:600;font-size:14.5px;padding:12px 16px;min-height:48px}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  @media (prefers-color-scheme: dark){ .btn.primary{color:#1c1503} }
+  .btn.block{width:100%}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn svg{width:18px;height:18px;flex:0 0 18px}
+  .scan-actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}
+  .scan-actions .primary{grid-column:1/-1}
+
+  /* search */
+  .searchbox{margin-top:16px}
+  .searchbox label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);display:block;margin-bottom:6px}
+  .search-row{display:flex;gap:8px}
+  .search-row input{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:15px;color:var(--ink);outline:none}
+  .search-row input:focus{border-color:var(--accent)}
+  .results{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px;margin-top:14px}
+  .res{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px;text-align:left;display:flex;flex-direction:column;gap:6px}
+  .res img{width:100%;aspect-ratio:63/88;object-fit:contain;background:var(--panel2);border-radius:7px}
+  .res .nm{font-size:12px;font-weight:600;line-height:1.25}
+  .res .mt{font-size:11px;color:var(--ink2);line-height:1.3}
+  .res .pr{font-family:var(--font-m);font-size:11.5px;color:var(--accent-ink);font-weight:600}
+  .img-fallback{width:100%;aspect-ratio:63/88;display:grid;place-items:center;background:var(--panel2);border-radius:7px;color:var(--ink2);font-family:var(--font-d);font-weight:800;font-size:19px;text-align:center;padding:6px}
+  .status-line{font-size:13px;color:var(--ink2);margin-top:10px;min-height:18px}
+  .status-line.err{color:var(--warn)}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;vertical-align:-2px;animation:sp 0.8s linear infinite;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* batch queue */
+  .queue-item{display:flex;gap:11px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;margin-top:9px;align-items:center;text-align:left;width:100%;color:var(--ink)}
+  .queue-item img,.queue-item .img-fallback{width:46px;height:64px;flex:0 0 46px;aspect-ratio:auto;border-radius:5px}
+  .queue-item .qi-main{flex:1;min-width:0}
+  .queue-item .qi-nm{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .queue-item .qi-mt{font-size:12px;color:var(--ink2)}
+  .flag{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:99px;background:var(--warn-soft);color:var(--warn);white-space:nowrap}
+  .flag.ok{background:var(--good-soft);color:var(--good)}
+
+  /* detail sheet */
+  .sheet-veil{position:fixed;inset:0;background:rgba(8,9,10,.55);z-index:50;display:none;align-items:flex-end;justify-content:center}
+  .sheet-veil.on{display:flex}
+  .sheet{background:var(--bg);width:100%;max-width:600px;max-height:92dvh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom));animation:up .22s ease}
+  @keyframes up{from{transform:translateY(24px);opacity:.4}to{transform:none;opacity:1}}
+  @media (prefers-reduced-motion: reduce){ .sheet{animation:none} .spinner{animation-duration:2s} }
+  .sheet-head{display:flex;gap:13px}
+  .sheet-head img,.sheet-head .img-fallback{width:96px;height:134px;flex:0 0 96px;border-radius:8px;border:1px solid var(--line)}
+  .sheet-head h3{font-family:var(--font-d);font-size:20px;font-weight:800;margin:0 0 3px;line-height:1.15}
+  .sheet-head .mt{font-size:12.5px;color:var(--ink2);line-height:1.45}
+  .sheet-head .mt b{color:var(--ink)}
+  .snap-note{font-size:11.5px;color:var(--ink2);margin-top:10px}
+  .x-btn{margin-left:auto;flex:0 0 36px;width:36px;height:36px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);display:grid;place-items:center}
+  .x-btn svg{width:17px;height:17px}
+  .field-lbl{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);margin:16px 0 7px}
+  .chips{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:99px;padding:8px 13px;font-size:13px;font-weight:600}
+  .chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+  .chip small{font-family:var(--font-m);font-weight:600;opacity:.75;margin-left:5px}
+
+  .cond-table{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
+  .cond-row{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;border:none;border-bottom:1px solid var(--line);background:transparent;padding:12px 13px;color:var(--ink)}
+  .cond-row:last-child{border-bottom:none}
+  .cond-row:active{background:var(--panel2)}
+  .cond-ab{font-family:var(--font-d);font-weight:800;font-size:14px;background:var(--chip);border-radius:8px;text-align:center;padding:7px 0}
+  .cond-mid .cp{font-family:var(--font-m);font-weight:600;font-size:16px}
+  .cond-mid .cw{font-size:11.5px;color:var(--ink2)}
+  .cond-mid .cw b{color:var(--good);font-family:var(--font-m)}
+  .cond-chev{color:var(--ink2)}
+  .cond-chev svg{width:18px;height:18px}
+
+  .notcard{margin-top:14px;width:100%;display:flex;align-items:center;gap:10px;background:var(--panel);border:1px dashed var(--accent);color:var(--accent-ink);border-radius:12px;padding:12px 14px;font-weight:600;font-size:14px}
+  .notcard svg{width:18px;height:18px}
+  .alts{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:9px;margin-top:10px}
+  .alt{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:7px;text-align:left;color:var(--ink)}
+  .alt img,.alt .img-fallback{width:100%;aspect-ratio:63/88;border-radius:6px;object-fit:contain;background:var(--panel2)}
+  .alt .nm{font-size:11.5px;font-weight:600;line-height:1.25;margin-top:5px}
+
+  /* stepper */
+  .stepper{display:flex;align-items:center;justify-content:center;gap:18px;margin:14px 0}
+  .stepper button{width:52px;height:52px;border-radius:50%;border:1px solid var(--line);background:var(--panel);font-size:24px;color:var(--ink);display:grid;place-items:center}
+  .stepper .qv{font-family:var(--font-m);font-size:30px;font-weight:600;min-width:64px;text-align:center}
+  .qty-quick{display:flex;gap:7px;justify-content:center;margin-bottom:6px}
+  .sumline{display:flex;justify-content:space-between;font-size:13.5px;padding:6px 2px;color:var(--ink2)}
+  .sumline b{color:var(--ink);font-family:var(--font-m)}
+
+  /* list view */
+  .totals{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:13px}
+  .tot{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .tot .tl{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--ink2)}
+  .tot .tv{font-family:var(--font-m);font-weight:600;font-size:17px;margin-top:2px}
+  .row-item{display:flex;gap:11px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;margin-top:9px;align-items:center}
+  .row-item img,.row-item .img-fallback{width:44px;height:61px;flex:0 0 44px;border-radius:5px;object-fit:contain;background:var(--panel2)}
+  .row-item .ri-main{flex:1;min-width:0}
+  .row-item .ri-nm{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row-item .ri-mt{font-size:12px;color:var(--ink2)}
+  .row-item .ri-pr{text-align:right}
+  .row-item .ri-pr .p{font-family:var(--font-m);font-weight:600;font-size:14.5px}
+  .row-item .ri-pr .q{font-size:11.5px;color:var(--ink2);font-family:var(--font-m)}
+  .mini-btn{border:1px solid var(--line);background:var(--panel2);color:var(--ink);border-radius:8px;width:30px;height:30px;font-size:16px;display:grid;place-items:center;flex:0 0 30px}
+  .qty-ctl{display:flex;align-items:center;gap:5px}
+  .qty-ctl .qv2{font-family:var(--font-m);font-weight:600;min-width:22px;text-align:center}
+  .empty{padding:34px 18px;text-align:center;color:var(--ink2);font-size:14px;border:1px dashed var(--line);border-radius:14px;margin-top:12px}
+  .export-note{font-size:12px;color:var(--ink2);margin-top:10px;text-align:center}
+
+  /* archive */
+  .arch{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:11px}
+  .arch h3{font-family:var(--font-d);margin:0 0 3px;font-size:16px;font-weight:700}
+  .arch .mt{font-size:12.5px;color:var(--ink2)}
+  .arch .rowline{display:flex;justify-content:space-between;margin-top:9px;font-size:13px;color:var(--ink2)}
+  .arch .rowline b{font-family:var(--font-m);color:var(--ink)}
+
+  /* settings */
+  .set-group{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px 14px;margin-top:12px}
+  .set-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}
+  .set-row:last-child{border-bottom:none}
+  .set-row .sl{font-size:14px;font-weight:500}
+  .set-row .sd{font-size:11.5px;color:var(--ink2);margin-top:1px;max-width:230px}
+  .set-row input[type=number],.set-row input[type=text]{width:92px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 10px;font-family:var(--font-m);font-size:14px;color:var(--ink);text-align:right;outline:none}
+  .set-row input[type=text]{width:170px;text-align:left;font-family:var(--font-b);font-size:13px}
+  .switch{position:relative;width:48px;height:28px;flex:0 0 48px}
+  .switch input{opacity:0;width:100%;height:100%;position:absolute;margin:0;cursor:pointer}
+  .switch .tk{position:absolute;inset:0;background:var(--chip);border-radius:99px;transition:.15s;pointer-events:none}
+  .switch .tk::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.15s}
+  .switch input:checked + .tk{background:var(--accent)}
+  .switch input:checked + .tk::after{left:23px}
+
+  /* bottom nav */
+  nav{position:fixed;left:0;right:0;bottom:0;z-index:40;background:var(--panel);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+  nav .inner{max-width:600px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr)}
+  nav button{background:none;border:none;padding:9px 4px 8px;color:var(--ink2);font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:3px}
+  nav button svg{width:21px;height:21px}
+  nav button.on{color:var(--accent-ink)}
+  .badge-dot{background:var(--accent);color:#fff;font-size:10px;font-family:var(--font-m);border-radius:99px;padding:1px 6px;margin-left:4px;vertical-align:2px}
+  @media (prefers-color-scheme: dark){ .badge-dot{color:#1c1503} }
+
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:96px;z-index:60;background:var(--ink);color:var(--bg);font-size:13.5px;font-weight:600;padding:11px 18px;border-radius:99px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .2s;max-width:88vw;text-align:center}
+  .toast.on{opacity:1}
+  .hidden-file{display:none}
+  dialog{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:16px;padding:20px;width:min(92vw,420px);box-shadow:var(--shadow)}
+  dialog::backdrop{background:rgba(8,9,10,.5)}
+  dialog h3{font-family:var(--font-d);margin:0 0 12px;font-size:17px}
+  dialog input[type=text]{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;font-size:15px;color:var(--ink);outline:none}
+  .dlg-btns{display:flex;gap:8px;margin-top:16px}
+  .dlg-btns .btn{flex:1}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="binder-row">
+      <div class="binder-pick">
+        <span class="lbl">Scanning into</span>
+        <select id="binderSelect" aria-label="Active binder"></select>
+      </div>
+      <button class="icon-btn" id="newBinderBtn" aria-label="New binder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button class="icon-btn" id="renameBinderBtn" aria-label="Rename binder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+      </button>
+    </div>
+    <div class="binder-meta"><span id="binderCount">0 cards</span><span>est. value <b id="binderValue">$0.00</b></span></div>
+  </header>
+
+  <main>
+    <!-- ============ SCAN ============ -->
+    <section class="view on" id="view-scan">
+      <div class="seg" role="tablist" aria-label="Scan mode">
+        <button id="modeSingle" class="on">Single scan</button>
+        <button id="modeBatch">Batch mode</button>
+      </div>
+
+      <div id="batchBar" style="display:none;margin-top:12px">
+        <div class="card-panel" style="padding:11px 13px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <div>
+              <div style="font-weight:600;font-size:14px">Rapid-log</div>
+              <div style="font-size:12px;color:var(--ink2)">Auto-adds each match at the preset condition — no review tap per card.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="rapidLogToggle"><span class="tk"></span></label>
+          </div>
+          <div id="rapidCondRow" style="display:none;margin-top:10px;align-items:center;gap:8px">
+            <span style="font-size:12.5px;color:var(--ink2)">Preset condition</span>
+            <select id="rapidCond" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;color:var(--ink);font-size:13.5px">
+              <option>Near Mint</option><option>Lightly Played</option><option>Moderately Played</option><option>Heavily Played</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="finder" id="finder">
+        <video id="camVideo" playsinline muted style="display:none"></video>
+        <div class="hint" id="finderHint">
+          <div>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <div>Point the camera at the front of a card.<br>The name along the top is what gets read.</div>
+          </div>
+        </div>
+        <div class="frame" id="finderFrame" style="display:none"></div>
+        <div class="batch-count" id="batchCount" style="display:none">Queue: 0</div>
+      </div>
+
+      <div class="scan-actions">
+        <button class="btn primary" id="scanBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg>
+          <span id="scanBtnLabel">Start camera &amp; scan</span>
+        </button>
+        <button class="btn" id="uploadBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+          Use a photo
+        </button>
+        <button class="btn" id="stopCamBtn" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          Stop camera
+        </button>
+      </div>
+      <input type="file" id="photoInput" class="hidden-file" accept="image/*" />
+      <div class="status-line" id="scanStatus"></div>
+
+      <div class="searchbox">
+        <label for="searchInput">Or search the catalog manually</label>
+        <div class="search-row">
+          <input id="searchInput" type="search" placeholder="Card name, e.g. Charizard, or 4/102" autocomplete="off" />
+          <button class="btn" id="searchBtn" style="min-height:0">Search</button>
+        </div>
+        <div class="status-line" id="searchStatus"></div>
+        <div class="results" id="searchResults"></div>
+      </div>
+
+      <div id="queueWrap" style="display:none;margin-top:18px">
+        <h2 style="font-size:17px">Batch queue</h2>
+        <p class="sub">Tap an item to confirm its condition. Flagged items need a second look — that's the accuracy check doing its job.</p>
+        <div id="queueList"></div>
+      </div>
+    </section>
+
+    <!-- ============ LIST ============ -->
+    <section class="view" id="view-list">
+      <h2 id="listTitle">Working list</h2>
+      <p class="sub">Prices are snapshots from the moment each card was scanned.</p>
+      <div class="totals">
+        <div class="tot"><div class="tl">Cards</div><div class="tv" id="totCards">0</div></div>
+        <div class="tot"><div class="tl">Est. value</div><div class="tv" id="totValue">$0</div></div>
+        <div class="tot"><div class="tl">WorthIt total</div><div class="tv" id="totWorth">$0</div></div>
+      </div>
+      <div id="listRows"></div>
+      <div id="listEmpty" class="empty">Nothing here yet. Scan or search for a card, tap a condition, and it lands in this binder.</div>
+      <div style="margin-top:16px">
+        <button class="btn primary block" id="exportBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          Export for TCGplayer bulk add
+        </button>
+        <div class="export-note">Exporting downloads the CSV and moves this binder into the archive, labeled with the date range its cards were scanned over. Your lists are saved in this browser on this device — they stay put until you export them.</div>
+      </div>
+    </section>
+
+    <!-- ============ ARCHIVE ============ -->
+    <section class="view" id="view-archive">
+      <h2>Export archive</h2>
+      <p class="sub">Every exported binder, kept by the date range it was built over. Re-download the CSV anytime.</p>
+      <div id="archiveList"></div>
+      <div id="archiveEmpty" class="empty">No exports yet. Export a binder and it'll show up here with its date range.</div>
+    </section>
+
+    <!-- ============ SETTINGS ============ -->
+    <section class="view" id="view-settings">
+      <h2>Settings</h2>
+      <p class="sub">WorthIt is the most you should pay for a card and still clear your number reselling it on eBay.</p>
+
+      <div class="field-lbl" style="margin-top:6px">WorthIt — eBay resale math</div>
+      <div class="set-group">
+        <div class="set-row"><div><div class="sl">Final value fee %</div><div class="sd">Trading cards on your Basic Store. 13.25% with no store.</div></div><input type="number" id="setFeePct" step="0.05" min="0" max="40"></div>
+        <div class="set-row"><div><div class="sl">Per-order fee ≤ $10</div><div class="sd">eBay's fixed per-order charge on smaller sales.</div></div><input type="number" id="setFeeLow" step="0.05" min="0"></div>
+        <div class="set-row"><div><div class="sl">Per-order fee &gt; $10</div><div class="sd">Fixed per-order charge above $10.</div></div><input type="number" id="setFeeHigh" step="0.05" min="0"></div>
+        <div class="set-row"><div><div class="sl">Shipping cost $</div><div class="sd">Your eBay Standard Envelope cost per card.</div></div><input type="number" id="setShip" step="0.05" min="0"></div>
+        <div class="set-row"><div><div class="sl">Income tax on profit %</div><div class="sd">Tax applies to the flip's profit only — at break-even it changes nothing.</div></div><input type="number" id="setTax" step="1" min="0" max="60"></div>
+        <div class="set-row"><div><div class="sl">Target margin $</div><div class="sd">Minimum profit you want per card. $0 = break-even.</div></div><input type="number" id="setMargin" step="0.25" min="0"></div>
+      </div>
+
+      <div class="field-lbl">Condition pricing</div>
+      <p class="sub" style="margin-bottom:0">The catalog publishes a Near Mint market price. Played-condition prices are estimated from it with these factors — set them to how you actually price.</p>
+      <div class="set-group">
+        <div class="set-row"><div><div class="sl">Lightly Played % of NM</div></div><input type="number" id="setLP" step="1" min="1" max="100"></div>
+        <div class="set-row"><div><div class="sl">Moderately Played % of NM</div></div><input type="number" id="setMP" step="1" min="1" max="100"></div>
+        <div class="set-row"><div><div class="sl">Heavily Played % of NM</div></div><input type="number" id="setHP" step="1" min="1" max="100"></div>
+      </div>
+
+      <div class="field-lbl">Catalog</div>
+      <div class="set-group">
+        <div class="set-row"><div><div class="sl">Pokemon TCG API key</div><div class="sd">Optional. A free key from pokemontcg.io raises the rate limit for heavy batch sessions.</div></div><input type="text" id="setApiKey" placeholder="Paste key (optional)"></div>
+      </div>
+      <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
+      <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
+    </section>
+  </main>
+
+  <nav>
+    <div class="inner">
+      <button data-view="scan" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg>Scan</button>
+      <button data-view="list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>List<span class="badge-dot" id="navListBadge" style="display:none">0</span></button>
+      <button data-view="archive"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>Archive</button>
+      <button data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
+    </div>
+  </nav>
+</div>
+
+<!-- card detail sheet -->
+<div class="sheet-veil" id="detailVeil">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Card details">
+    <div class="sheet-head">
+      <span id="dImgWrap"></span>
+      <div style="min-width:0">
+        <h3 id="dName">Card</h3>
+        <div class="mt" id="dMeta"></div>
+        <div class="mt" id="dRarity"></div>
+      </div>
+      <button class="x-btn" id="dClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+
+    <div id="dScanNote"></div>
+
+    <div class="field-lbl">Printing</div>
+    <div class="chips" id="dPrintings"></div>
+
+    <div class="field-lbl">Language</div>
+    <div class="chips" id="dLanguages"></div>
+
+    <div class="field-lbl">Tap a condition to add it</div>
+    <div class="cond-table" id="dConds"></div>
+    <div class="snap-note" id="dSnapNote"></div>
+
+    <div id="dAltsWrap" style="display:none">
+      <button class="notcard" id="dNotCard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M8 11h6"/></svg>
+        Not this card? See other matches
+      </button>
+      <div class="alts" id="dAlts" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- quantity stepper sheet -->
+<div class="sheet-veil" id="qtyVeil">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Choose quantity">
+    <div class="sheet-head">
+      <div style="min-width:0">
+        <h3 id="qTitle">Add to binder</h3>
+        <div class="mt" id="qMeta"></div>
+      </div>
+      <button class="x-btn" id="qClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="stepper">
+      <button id="qMinus" aria-label="Decrease quantity">−</button>
+      <div class="qv" id="qVal">1</div>
+      <button id="qPlus" aria-label="Increase quantity">+</button>
+    </div>
+    <div class="qty-quick">
+      <button class="chip" data-qset="4">×4</button>
+      <button class="chip" data-qset="10">×10</button>
+      <button class="chip" data-qset="25">×25</button>
+      <button class="chip" data-qset="50">×50</button>
+    </div>
+    <div class="sumline"><span>Unit price (snapshot)</span><b id="qUnit">$0.00</b></div>
+    <div class="sumline"><span>Line total</span><b id="qLine">$0.00</b></div>
+    <div class="sumline"><span>WorthIt buy-at-or-under (each)</span><b id="qWorth">$0.00</b></div>
+    <button class="btn primary block" id="qConfirm" style="margin-top:12px">Add to binder</button>
+  </div>
+</div>
+
+<dialog id="binderDlg">
+  <h3 id="binderDlgTitle">New binder</h3>
+  <input type="text" id="binderNameInput" placeholder="e.g. October bulk, Japanese binder" maxlength="48" />
+  <div class="dlg-btns">
+    <button class="btn" id="binderCancel">Cancel</button>
+    <button class="btn primary" id="binderSave">Save</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js"></script>
+<script>
+"use strict";
+/* ================= state (persisted on this device) ================= */
+var CONDITIONS = [
+  { ab:"NM", name:"Near Mint",        key:"nm", factor:function(s){return 1;} },
+  { ab:"LP", name:"Lightly Played",   key:"lp", factor:function(s){return s.lpPct/100;} },
+  { ab:"MP", name:"Moderately Played",key:"mp", factor:function(s){return s.mpPct/100;} },
+  { ab:"HP", name:"Heavily Played",   key:"hp", factor:function(s){return s.hpPct/100;} }
+];
+var LANGUAGES = ["English","Japanese","German","French","Spanish","Italian","Korean","Chinese","Portuguese"];
+var PRINT_LABEL = { normal:"Normal", holofoil:"Holofoil", reverseHolofoil:"Reverse Holofoil",
+  "1stEditionNormal":"1st Edition", "1stEditionHolofoil":"1st Edition Holofoil",
+  unlimited:"Unlimited", unlimitedHolofoil:"Unlimited Holofoil" };
+
+function uid(){ return Math.random().toString(36).slice(2,9) + Date.now().toString(36); }
+
+var state = {
+  settings: { feePct:12.35, feeLow:0.30, feeHigh:0.40, ship:1.00, taxRate:25, margin:0,
+              lpPct:85, mpPct:70, hpPct:55, apiKey:"" },
+  binders: [], activeBinderId: null, archives: [],
+  mode: "single", rapidLog: false,
+  queue: []  // batch holding queue: {id, card, candidates, flagged, note}
+};
+function newBinder(name){
+  var b = { id: uid(), name: name, createdAt: Date.now(), rows: [] };
+  state.binders.push(b); state.activeBinderId = b.id; return b;
+}
+
+/* ---------- on-device persistence (this browser only, no server) ---------- */
+var STORAGE_KEY = "card-scanner.v1";
+function persist(){
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      settings: state.settings,
+      binders: state.binders,
+      activeBinderId: state.activeBinderId,
+      archives: state.archives
+    }));
+  } catch (e) { /* storage unavailable (e.g. private mode) — app still works for this visit */ }
+}
+function restoreSaved(){
+  var raw;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { return false; }
+  if (!raw) return false;
+  try {
+    var d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.binders) || !d.binders.length) return false;
+    if (d.settings){ for (var k in state.settings){ if (typeof d.settings[k] !== "undefined") state.settings[k] = d.settings[k]; } }
+    state.binders = d.binders;
+    state.activeBinderId = d.activeBinderId;
+    state.archives = Array.isArray(d.archives) ? d.archives : [];
+    if (!activeBinder()) state.activeBinderId = state.binders[0].id;
+    return true;
+  } catch (e) { return false; }
+}
+if (!restoreSaved()) newBinder("Working list");
+function activeBinder(){ for (var i=0;i<state.binders.length;i++) if (state.binders[i].id===state.activeBinderId) return state.binders[i]; return state.binders[0]; }
+
+/* ================= helpers ================= */
+function $(id){ return document.getElementById(id); }
+function money(n){ if (n==null || isNaN(n)) return "—"; return "$" + Number(n).toFixed(2); }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+var toastTimer = null;
+function toast(msg){ var t=$("toast"); t.textContent=msg; t.classList.add("on"); clearTimeout(toastTimer); toastTimer=setTimeout(function(){ t.classList.remove("on"); }, 2400); }
+
+function worthIt(sale){
+  var s = state.settings;
+  if (sale==null || isNaN(sale) || sale<=0) return 0;
+  var fees = sale * (s.feePct/100) + (sale > 10 ? s.feeHigh : s.feeLow);
+  var buy = sale - fees - s.ship - s.margin / (1 - s.taxRate/100);
+  return Math.max(0, buy);
+}
+function condPrice(card, printingKey, cond){
+  var p = (card.tcgplayer && card.tcgplayer.prices && card.tcgplayer.prices[printingKey]) || null;
+  if (!p || p.market == null) return null;
+  return Math.round(p.market * cond.factor(state.settings) * 100) / 100;
+}
+function nmMarket(card){
+  var pr = (card.tcgplayer && card.tcgplayer.prices) || {};
+  var keys = Object.keys(pr);
+  for (var i=0;i<keys.length;i++){ if (pr[keys[i]] && pr[keys[i]].market != null) return pr[keys[i]].market; }
+  return null;
+}
+function printingKeys(card){
+  var pr = (card.tcgplayer && card.tcgplayer.prices) || {};
+  return Object.keys(pr).filter(function(k){ return pr[k] && (pr[k].market != null || pr[k].mid != null); });
+}
+function tcgId(card){
+  var u = card.tcgplayer && card.tcgplayer.url ? card.tcgplayer.url : "";
+  var m = u.match(/product\/(\d+)/) || u.match(/(\d{4,})/);
+  return m ? m[1] : "";
+}
+function cardImg(card, cls){
+  var src = card.images && (card.images.small || card.images.large) || "";
+  if (!src) return '<span class="img-fallback '+(cls||"")+'">'+esc(card.name||"?")+'</span>';
+  return '<img class="'+(cls||"")+'" src="'+esc(src)+'" alt="'+esc(card.name||"card")+'" loading="lazy" onerror="this.outerHTML=\'<span class=&quot;img-fallback&quot;>'+esc(card.name||"?")+'</span>\'">';
+}
+
+/* ================= Pokemon TCG API ================= */
+var API = "https://api.pokemontcg.io/v2/cards";
+function apiFetch(q, pageSize){
+  var url = API + "?q=" + encodeURIComponent(q) + "&pageSize=" + (pageSize||24) +
+            "&select=id,name,number,rarity,set,images,tcgplayer&orderBy=set.releaseDate";
+  var headers = {};
+  if (state.settings.apiKey) headers["X-Api-Key"] = state.settings.apiKey;
+  return fetch(url, { headers: headers }).then(function(r){
+    if (!r.ok) throw new Error("Catalog returned " + r.status);
+    return r.json();
+  }).then(function(j){ return j.data || []; });
+}
+function searchCatalog(term){
+  term = term.trim();
+  if (!term) return Promise.resolve([]);
+  var numMatch = term.match(/^(.+?)\s+(\d+)\s*\/\s*(\d+)$/);
+  if (numMatch) return apiFetch('name:"'+numMatch[1].trim()+'*" number:"'+numMatch[2]+'"', 24);
+  if (/^\d+\s*\/\s*\d+$/.test(term)) return apiFetch('number:"'+term.split("/")[0].trim()+'"', 24);
+  return apiFetch('name:"'+term.replace(/"/g,"")+'*"', 30);
+}
+
+/* ================= views / nav ================= */
+function showView(name){
+  ["scan","list","archive","settings"].forEach(function(v){
+    $("view-"+v).classList.toggle("on", v===name);
+  });
+  document.querySelectorAll("nav button").forEach(function(b){
+    b.classList.toggle("on", b.getAttribute("data-view")===name);
+  });
+  if (name==="list") renderList();
+  if (name==="archive") renderArchive();
+  window.scrollTo(0,0);
+}
+document.querySelectorAll("nav button").forEach(function(b){
+  b.addEventListener("click", function(){ showView(b.getAttribute("data-view")); });
+});
+
+/* ================= binders ================= */
+function renderBinders(){
+  var sel = $("binderSelect"); sel.innerHTML = "";
+  state.binders.forEach(function(b){
+    var o = document.createElement("option");
+    o.value = b.id; o.textContent = b.name; sel.appendChild(o);
+  });
+  sel.value = state.activeBinderId;
+  var b = activeBinder();
+  var n = b.rows.reduce(function(a,r){ return a + r.qty; }, 0);
+  var v = b.rows.reduce(function(a,r){ return a + r.qty * (r.price||0); }, 0);
+  $("binderCount").textContent = n + (n===1 ? " card" : " cards") + " in binder";
+  $("binderValue").textContent = money(v);
+  var badge = $("navListBadge");
+  badge.style.display = n ? "inline-block" : "none"; badge.textContent = n;
+  $("listTitle").textContent = b.name;
+  persist();
+}
+$("binderSelect").addEventListener("change", function(){ state.activeBinderId = this.value; renderBinders(); renderList(); });
+
+var binderDlgMode = "new";
+function openBinderDlg(mode){
+  binderDlgMode = mode;
+  $("binderDlgTitle").textContent = mode==="new" ? "New binder" : "Rename binder";
+  $("binderNameInput").value = mode==="rename" ? activeBinder().name : "";
+  $("binderDlg").showModal();
+  setTimeout(function(){ $("binderNameInput").focus(); }, 50);
+}
+$("newBinderBtn").addEventListener("click", function(){ openBinderDlg("new"); });
+$("renameBinderBtn").addEventListener("click", function(){ openBinderDlg("rename"); });
+$("binderCancel").addEventListener("click", function(){ $("binderDlg").close(); });
+$("binderSave").addEventListener("click", function(){
+  var name = $("binderNameInput").value.trim();
+  if (!name) return;
+  if (binderDlgMode==="new"){ newBinder(name); toast("Scanning into “"+name+"” now"); }
+  else { activeBinder().name = name; toast("Binder renamed"); }
+  $("binderDlg").close(); renderBinders(); renderList();
+});
+
+/* ================= card detail sheet ================= */
+var detail = null; // {card, candidates, printing, language, snapshotAt, queueId|null}
+function openDetail(card, opts){
+  opts = opts || {};
+  var keys = printingKeys(card);
+  detail = {
+    card: card,
+    candidates: opts.candidates || null,
+    printing: keys.indexOf("holofoil")>=0 ? "holofoil" : (keys[0] || "normal"),
+    language: "English",
+    snapshotAt: Date.now(),
+    queueId: opts.queueId || null
+  };
+  renderDetail();
+  $("detailVeil").classList.add("on");
+}
+function closeDetail(){ $("detailVeil").classList.remove("on"); detail = null; }
+$("dClose").addEventListener("click", closeDetail);
+$("detailVeil").addEventListener("click", function(e){ if (e.target===this) closeDetail(); });
+
+function renderDetail(){
+  if (!detail) return;
+  var c = detail.card;
+  $("dImgWrap").innerHTML = cardImg(c);
+  $("dName").textContent = c.name || "Unknown card";
+  var setName = c.set && c.set.name ? c.set.name : "";
+  $("dMeta").innerHTML = esc(setName) + (c.number ? ' &middot; <b>#'+esc(c.number)+"</b>" : "");
+  $("dRarity").innerHTML = c.rarity ? "Rarity: <b>"+esc(c.rarity)+"</b>" : "";
+  var note = $("dScanNote");
+  if (detail.queueId){
+    note.innerHTML = '<div class="snap-note" style="background:var(--warn-soft);color:var(--warn);border-radius:9px;padding:8px 11px;margin-top:12px">From the batch queue — double-check this is the right card before confirming.</div>';
+  } else note.innerHTML = "";
+
+  var keys = printingKeys(c);
+  $("dPrintings").innerHTML = keys.length ? keys.map(function(k){
+    var p = c.tcgplayer.prices[k];
+    return '<button class="chip'+(k===detail.printing?" on":"")+'" data-print="'+esc(k)+'">'+esc(PRINT_LABEL[k]||k)+(p&&p.market!=null? "<small>"+money(p.market)+"</small>":"")+"</button>";
+  }).join("") : '<span style="font-size:13px;color:var(--ink2)">No TCGplayer pricing published for this printing.</span>';
+  $("dPrintings").querySelectorAll("[data-print]").forEach(function(b){
+    b.addEventListener("click", function(){ detail.printing = b.getAttribute("data-print"); renderDetail(); });
+  });
+
+  $("dLanguages").innerHTML = LANGUAGES.map(function(l){
+    return '<button class="chip'+(l===detail.language?" on":"")+'" data-lang="'+esc(l)+'">'+esc(l)+"</button>";
+  }).join("");
+  $("dLanguages").querySelectorAll("[data-lang]").forEach(function(b){
+    b.addEventListener("click", function(){ detail.language = b.getAttribute("data-lang"); renderDetail(); });
+  });
+
+  var t = new Date(detail.snapshotAt);
+  $("dConds").innerHTML = CONDITIONS.map(function(cond){
+    var price = condPrice(c, detail.printing, cond);
+    var w = price ? worthIt(price) : 0;
+    return '<button class="cond-row" data-cond="'+cond.key+'" '+(price==null?"disabled style=opacity:.45":"")+'>' +
+      '<span class="cond-ab">'+cond.ab+'</span>' +
+      '<span class="cond-mid"><span class="cp">'+(price==null?"No price":money(price))+'</span>' +
+      (cond.key!=="nm" ? ' <span style="font-size:11px;color:var(--ink2)">est. from NM</span>' : "") +
+      '<br><span class="cw">WorthIt: buy at <b>'+money(w)+'</b> or under</span></span>' +
+      '<span class="cond-chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></button>';
+  }).join("");
+  $("dConds").querySelectorAll("[data-cond]").forEach(function(b){
+    b.addEventListener("click", function(){
+      var cond = CONDITIONS.filter(function(x){ return x.key===b.getAttribute("data-cond"); })[0];
+      openQty(cond);
+    });
+  });
+  $("dSnapNote").textContent = "Prices snapshotted " + t.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}) +
+    " from TCGplayer market (NM). Played conditions are estimated from NM with your Settings factors.";
+
+  var showAlts = detail.candidates && detail.candidates.length > 1;
+  $("dAltsWrap").style.display = showAlts ? "block" : "none";
+  $("dAlts").style.display = "none";
+  if (showAlts){
+    $("dAlts").innerHTML = detail.candidates.map(function(alt, i){
+      if (alt.id === c.id) return "";
+      return '<button class="alt" data-alt="'+i+'">'+cardImg(alt)+'<div class="nm">'+esc(alt.name)+'</div><div style="font-size:11px;color:var(--ink2)">'+esc(alt.set&&alt.set.name||"")+' #'+esc(alt.number||"")+'</div></button>';
+    }).join("");
+    $("dAlts").querySelectorAll("[data-alt]").forEach(function(b){
+      b.addEventListener("click", function(){
+        var alt = detail.candidates[Number(b.getAttribute("data-alt"))];
+        detail.card = alt;
+        var k = printingKeys(alt);
+        detail.printing = k.indexOf("holofoil")>=0 ? "holofoil" : (k[0]||"normal");
+        renderDetail();
+        toast("Switched to " + alt.name);
+      });
+    });
+  }
+}
+$("dNotCard").addEventListener("click", function(){
+  var a = $("dAlts"), open = a.style.display !== "none";
+  a.style.display = open ? "none" : "grid";
+  if (open) return;
+  if (!a.children.length){
+    a.innerHTML = '<div style="grid-column:1/-1;font-size:13px;color:var(--ink2)">No other matches from that read. Close this and use manual search with the card name or number (like 4/102).</div>';
+  }
+});
+
+/* ================= quantity stepper ================= */
+var qtyCtx = null; // {cond, price}
+function openQty(cond){
+  if (!detail) return;
+  var price = condPrice(detail.card, detail.printing, cond);
+  if (price == null) return;
+  qtyCtx = { cond: cond, price: price, qty: 1 };
+  $("qTitle").textContent = "Add " + cond.name;
+  $("qMeta").textContent = detail.card.name + " · " + (PRINT_LABEL[detail.printing]||detail.printing) + " · " + detail.language;
+  renderQty();
+  $("qtyVeil").classList.add("on");
+}
+function renderQty(){
+  $("qVal").textContent = qtyCtx.qty;
+  $("qUnit").textContent = money(qtyCtx.price);
+  $("qLine").textContent = money(qtyCtx.price * qtyCtx.qty);
+  $("qWorth").textContent = money(worthIt(qtyCtx.price));
+}
+$("qMinus").addEventListener("click", function(){ qtyCtx.qty = Math.max(1, qtyCtx.qty-1); renderQty(); });
+$("qPlus").addEventListener("click", function(){ qtyCtx.qty = Math.min(999, qtyCtx.qty+1); renderQty(); });
+document.querySelectorAll("[data-qset]").forEach(function(b){
+  b.addEventListener("click", function(){ qtyCtx.qty = Number(b.getAttribute("data-qset")); renderQty(); });
+});
+$("qClose").addEventListener("click", function(){ $("qtyVeil").classList.remove("on"); });
+$("qtyVeil").addEventListener("click", function(e){ if (e.target===this) this.classList.remove("on"); });
+$("qConfirm").addEventListener("click", function(){
+  if (!detail || !qtyCtx) return;
+  addRow(detail.card, {
+    printing: detail.printing, language: detail.language,
+    condition: qtyCtx.cond.name, price: qtyCtx.price,
+    worthItEach: worthIt(qtyCtx.price), qty: qtyCtx.qty
+  });
+  var qid = detail.queueId;
+  $("qtyVeil").classList.remove("on");
+  closeDetail();
+  if (qid){ removeFromQueue(qid); toast("Added — queue updated"); }
+  else toast("Added to " + activeBinder().name);
+});
+
+function addRow(card, o){
+  var b = activeBinder();
+  for (var i=0;i<b.rows.length;i++){
+    var r = b.rows[i];
+    if (r.cardId===card.id && r.printing===o.printing && r.condition===o.condition && r.language===o.language){
+      r.qty += o.qty; r.addedAt = Date.now(); renderBinders(); renderList(); return;
+    }
+  }
+  b.rows.push({
+    id: uid(), cardId: card.id, name: card.name, set: card.set && card.set.name || "",
+    setId: card.set && card.set.id || "", number: card.number || "", rarity: card.rarity || "",
+    printing: o.printing, language: o.language, condition: o.condition,
+    price: o.price, worthItEach: o.worthItEach, qty: o.qty,
+    img: card.images && card.images.small || "", addedAt: Date.now()
+  });
+  renderBinders(); renderList();
+}
+
+/* ================= manual search ================= */
+function renderResults(cards){
+  var wrap = $("searchResults");
+  if (!cards.length){ wrap.innerHTML = ""; $("searchStatus").innerHTML = "No matches. Try the name plus collector number, like <b>Charizard 4/102</b>."; return; }
+  $("searchStatus").textContent = cards.length + " result" + (cards.length===1?"":"s") + " — tap the exact card (set + number matter).";
+  wrap.innerHTML = cards.map(function(c, i){
+    var m = nmMarket(c);
+    return '<button class="res" data-res="'+i+'">'+cardImg(c)+
+      '<span class="nm">'+esc(c.name)+'</span>'+
+      '<span class="mt">'+esc(c.set&&c.set.name||"")+'<br>#'+esc(c.number||"")+(c.rarity?" · "+esc(c.rarity):"")+'</span>'+
+      (m!=null?'<span class="pr">NM '+money(m)+'</span>':'<span class="pr">no price</span>')+'</button>';
+  }).join("");
+  wrap.querySelectorAll("[data-res]").forEach(function(b){
+    b.addEventListener("click", function(){ openDetail(cards[Number(b.getAttribute("data-res"))]); });
+  });
+}
+var searchSeq = 0;
+function doSearch(){
+  var term = $("searchInput").value.trim();
+  if (!term) return;
+  var seq = ++searchSeq;
+  $("searchStatus").innerHTML = '<span class="spinner"></span>Searching the catalog…';
+  searchCatalog(term).then(function(cards){
+    if (seq !== searchSeq) return;
+    renderResults(cards);
+  }).catch(function(err){
+    if (seq !== searchSeq) return;
+    $("searchStatus").innerHTML = '<span class="err">Search failed ('+esc(err.message)+'). Check your connection and try again.</span>';
+  });
+}
+$("searchBtn").addEventListener("click", doSearch);
+$("searchInput").addEventListener("keydown", function(e){ if (e.key==="Enter") doSearch(); });
+
+/* ================= camera + OCR ================= */
+var stream = null, scanning = false;
+function setScanStatus(html, isErr){
+  var el = $("scanStatus");
+  el.innerHTML = html || "";
+  el.className = "status-line" + (isErr ? " err" : "");
+}
+function startCamera(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    setScanStatus("Live camera isn't available in this browser view. Use <b>Use a photo</b> instead — it reads the card the same way.", true);
+    return Promise.reject(new Error("no camera"));
+  }
+  return navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+    .then(function(s){
+      stream = s;
+      var v = $("camVideo");
+      v.srcObject = s; v.style.display = "block";
+      $("finderHint").style.display = "none";
+      $("finderFrame").style.display = "block";
+      $("stopCamBtn").style.display = "";
+      $("scanBtnLabel").textContent = state.mode==="batch" ? "Read card & keep going" : "Read this card";
+      return v.play();
+    })
+    .catch(function(){
+      setScanStatus("Camera permission was blocked. Use <b>Use a photo</b> instead — it reads the card the same way.", true);
+      throw new Error("camera blocked");
+    });
+}
+function stopCamera(){
+  if (stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  $("camVideo").style.display = "none";
+  $("finderHint").style.display = "grid";
+  $("finderFrame").style.display = "none";
+  $("stopCamBtn").style.display = "none";
+  $("scanBtnLabel").textContent = "Start camera & scan";
+}
+$("stopCamBtn").addEventListener("click", stopCamera);
+
+function captureFrame(){
+  var v = $("camVideo");
+  var c = document.createElement("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  return c;
+}
+
+function cleanName(line){
+  return line.replace(/[^A-Za-zÀ-ÿ0-9'’.\- ]/g, " ").replace(/\s+/g, " ").trim();
+}
+function ocrCandidates(text){
+  var lines = text.split(/\n/).map(cleanName).filter(function(l){ return l.length >= 3; });
+  var seen = {}, out = [];
+  lines.forEach(function(l){
+    var w = l.split(" ").slice(0, 3).join(" ");
+    [l, w].forEach(function(cand){
+      cand = cand.trim();
+      if (cand.length >= 3 && !seen[cand.toLowerCase()]){ seen[cand.toLowerCase()] = 1; out.push(cand); }
+    });
+  });
+  return out.slice(0, 4);
+}
+
+function identifyCanvas(source, sourceLabel){
+  if (scanning) return;
+  scanning = true;
+  setScanStatus('<span class="spinner"></span>Reading the card name…');
+  if (typeof Tesseract === "undefined"){
+    scanning = false;
+    setScanStatus("The card reader couldn't load. Check your connection, or use manual search below.", true);
+    return;
+  }
+  Tesseract.recognize(source, "eng").then(function(res){
+    var text = (res && res.data && res.data.text) || "";
+    var names = ocrCandidates(text);
+    var numMatch = text.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
+    if (!names.length){
+      scanning = false;
+      handleNoMatch("Couldn't read a name off that " + sourceLabel + ". Try steadier light, fill the frame with the card top — or search manually below.");
+      return;
+    }
+    var queries = names.map(function(n){
+      return numMatch ? 'name:"'+n+'*" number:"'+numMatch[1]+'"' : 'name:"'+n+'*"';
+    });
+    // try reads in order until one hits
+    (function tryNext(i){
+      if (i >= queries.length){
+        scanning = false;
+        handleNoMatch("Read “" + esc(names[0]) + "” but found no catalog match. Check the spelling in manual search below.");
+        return;
+      }
+      apiFetch(queries[i], 12).then(function(cards){
+        if (!cards.length) return tryNext(i+1);
+        scanning = false;
+        handleMatch(cards, names[i]);
+      }).catch(function(){ tryNext(i+1); });
+    })(0);
+  }).catch(function(){
+    scanning = false;
+    handleNoMatch("Reading failed on that " + sourceLabel + ". Try again or search manually below.");
+  });
+}
+
+function handleMatch(cards, readName){
+  setScanStatus("Read <b>" + esc(readName) + "</b> — confirm it's the right card.");
+  var best = cards[0];
+  var lowConf = cards.length > 1 && (cards[1].name || "").toLowerCase() !== (best.name || "").toLowerCase() || cards.length > 4;
+  if (state.mode === "batch"){
+    if (state.rapidLog && !lowConf){
+      var keys = printingKeys(best);
+      var pk = keys.indexOf("holofoil")>=0 ? "holofoil" : (keys[0]||"normal");
+      var condName = $("rapidCond").value;
+      var cond = CONDITIONS.filter(function(x){ return x.name===condName; })[0];
+      var probe = { tcgplayer: best.tcgplayer };
+      var price = condPrice(best, pk, cond);
+      if (price != null){
+        addRow(best, { printing: pk, language: "English", condition: condName, price: price, worthItEach: worthIt(price), qty: 1 });
+        toast("Auto-added " + best.name + " (" + cond.ab + ")");
+      } else {
+        pushQueue(best, cards, true, "No market price — needs a look");
+      }
+    } else {
+      pushQueue(best, cards, lowConf, lowConf ? "Several close matches — confirm" : "");
+      toast("Queued: " + best.name);
+    }
+    renderQueue();
+  } else {
+    openDetail(best, { candidates: cards });
+  }
+}
+function handleNoMatch(msg){
+  setScanStatus(msg, true);
+  if (state.mode === "batch"){
+    state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: "Couldn't read it — tap to search manually" });
+    renderQueue();
+  }
+}
+function pushQueue(card, candidates, flagged, note){
+  state.queue.push({ id: uid(), card: card, candidates: candidates || [], flagged: !!flagged, note: note || "" });
+}
+function removeFromQueue(id){
+  state.queue = state.queue.filter(function(q){ return q.id !== id; });
+  renderQueue();
+}
+function renderQueue(){
+  var wrap = $("queueWrap");
+  wrap.style.display = state.queue.length ? "block" : "none";
+  var bc = $("batchCount");
+  bc.style.display = state.queue.length ? "block" : "none";
+  bc.textContent = "Queue: " + state.queue.length;
+  $("queueList").innerHTML = state.queue.map(function(q){
+    if (!q.card){
+      return '<button class="queue-item" data-q="'+q.id+'"><span class="img-fallback">?</span><span class="qi-main"><span class="qi-nm">Unread card</span><br><span class="qi-mt">'+esc(q.note)+'</span></span><span class="flag">CHECK</span></button>';
+    }
+    return '<button class="queue-item" data-q="'+q.id+'">'+cardImg(q.card)+
+      '<span class="qi-main"><span class="qi-nm">'+esc(q.card.name)+'</span><br><span class="qi-mt">'+esc(q.card.set&&q.card.set.name||"")+' #'+esc(q.card.number||"")+'</span>'+(q.note?'<br><span class="qi-mt">'+esc(q.note)+'</span>':"")+'</span>'+
+      (q.flagged ? '<span class="flag">CHECK</span>' : '<span class="flag ok">TAP TO GRADE</span>')+'</button>';
+  }).join("");
+  $("queueList").querySelectorAll("[data-q]").forEach(function(b){
+    b.addEventListener("click", function(){
+      var q = state.queue.filter(function(x){ return x.id===b.getAttribute("data-q"); })[0];
+      if (!q) return;
+      if (!q.card){
+        removeFromQueue(q.id);
+        $("searchInput").focus();
+        toast("Search for that card by name or number");
+        showView("scan");
+        return;
+      }
+      openDetail(q.card, { candidates: q.candidates.length>1 ? q.candidates : null, queueId: q.id });
+    });
+  });
+}
+
+$("scanBtn").addEventListener("click", function(){
+  if (!stream){
+    startCamera().catch(function(){});
+    return;
+  }
+  if (!$("camVideo").videoWidth){ setScanStatus("Camera is still warming up — one more second.", false); return; }
+  identifyCanvas(captureFrame(), "frame");
+});
+$("uploadBtn").addEventListener("click", function(){ $("photoInput").click(); });
+$("photoInput").addEventListener("change", function(){
+  var f = this.files && this.files[0];
+  this.value = "";
+  if (!f) return;
+  var img = new Image();
+  img.onload = function(){
+    var max = 1400, scale = Math.min(1, max / Math.max(img.width, img.height));
+    var c = document.createElement("canvas");
+    c.width = Math.round(img.width*scale); c.height = Math.round(img.height*scale);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(img.src);
+    identifyCanvas(c, "photo");
+  };
+  img.onerror = function(){ setScanStatus("That image couldn't be opened. Try another photo.", true); };
+  img.src = URL.createObjectURL(f);
+});
+
+/* mode toggle */
+function setMode(m){
+  state.mode = m;
+  $("modeSingle").classList.toggle("on", m==="single");
+  $("modeBatch").classList.toggle("on", m==="batch");
+  $("batchBar").style.display = m==="batch" ? "block" : "none";
+  if (stream) $("scanBtnLabel").textContent = m==="batch" ? "Read card & keep going" : "Read this card";
+  if (m==="batch") renderQueue();
+}
+$("modeSingle").addEventListener("click", function(){ setMode("single"); });
+$("modeBatch").addEventListener("click", function(){ setMode("batch"); });
+$("rapidLogToggle").addEventListener("change", function(){
+  state.rapidLog = this.checked;
+  $("rapidCondRow").style.display = this.checked ? "flex" : "none";
+});
+
+/* ================= list view ================= */
+function renderList(){
+  var b = activeBinder();
+  var wrap = $("listRows");
+  $("listEmpty").style.display = b.rows.length ? "none" : "block";
+  var n = b.rows.reduce(function(a,r){ return a+r.qty; }, 0);
+  var v = b.rows.reduce(function(a,r){ return a+(r.price||0)*r.qty; }, 0);
+  var w = b.rows.reduce(function(a,r){ return a+(r.worthItEach||0)*r.qty; }, 0);
+  $("totCards").textContent = n;
+  $("totValue").textContent = money(v);
+  $("totWorth").textContent = money(w);
+  var sorted = b.rows.slice().sort(function(a,b2){ return b2.addedAt - a.addedAt; });
+  wrap.innerHTML = sorted.map(function(r){
+    var cardLike = { name: r.name, images: { small: r.img } };
+    return '<div class="row-item">'+cardImg(cardLike)+
+      '<div class="ri-main"><div class="ri-nm">'+esc(r.name)+'</div>'+
+      '<div class="ri-mt">'+esc(r.set)+' #'+esc(r.number)+' · '+esc(PRINT_LABEL[r.printing]||r.printing)+'<br>'+esc(r.condition)+' · '+esc(r.language)+'</div></div>'+
+      '<div class="qty-ctl"><button class="mini-btn" data-dec="'+r.id+'" aria-label="One less">−</button><span class="qv2">'+r.qty+'</span><button class="mini-btn" data-inc="'+r.id+'" aria-label="One more">+</button></div>'+
+      '<div class="ri-pr"><div class="p">'+money((r.price||0)*r.qty)+'</div><div class="q">'+money(r.price)+' ea</div></div>'+
+      '<button class="mini-btn" data-del="'+r.id+'" aria-label="Remove row" style="color:var(--warn)">×</button></div>';
+  }).join("");
+  wrap.querySelectorAll("[data-inc]").forEach(function(x){ x.addEventListener("click", function(){ changeQty(x.getAttribute("data-inc"), 1); }); });
+  wrap.querySelectorAll("[data-dec]").forEach(function(x){ x.addEventListener("click", function(){ changeQty(x.getAttribute("data-dec"), -1); }); });
+  wrap.querySelectorAll("[data-del]").forEach(function(x){ x.addEventListener("click", function(){ deleteRow(x.getAttribute("data-del")); }); });
+  renderBinders();
+}
+function changeQty(id, d){
+  var b = activeBinder();
+  b.rows.forEach(function(r){ if (r.id===id) r.qty = Math.max(0, r.qty + d); });
+  b.rows = b.rows.filter(function(r){ return r.qty > 0; });
+  renderList();
+}
+function deleteRow(id){
+  var b = activeBinder();
+  b.rows = b.rows.filter(function(r){ return r.id !== id; });
+  renderList();
+}
+
+/* ================= export + archive ================= */
+function dateRangeLabel(rows){
+  if (!rows.length) return "";
+  var times = rows.map(function(r){ return r.addedAt; });
+  var a = new Date(Math.min.apply(null, times)), z = new Date(Math.max.apply(null, times));
+  var fmt = function(d){ return d.toLocaleDateString("en-US", { month:"short", day:"numeric" }); };
+  var sameYear = a.getFullYear() === z.getFullYear();
+  var sameDay = a.toDateString() === z.toDateString();
+  if (sameDay) return fmt(a) + ", " + a.getFullYear();
+  return fmt(a) + " – " + fmt(z) + (sameYear ? ", " + a.getFullYear() : ", " + a.getFullYear() + " – " + z.getFullYear());
+}
+function csvCell(v){
+  v = v == null ? "" : String(v);
+  return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+function buildCsv(rows){
+  var head = ["TCGplayer Id","Product Name","Set Name","Number","Rarity","Condition","Printing","Language","Add to Quantity","Market Price (snapshot)"];
+  var lines = [head.join(",")];
+  rows.forEach(function(r){
+    var condName = r.condition;
+    var printing = PRINT_LABEL[r.printing] || r.printing;
+    lines.push([
+      r.tcgId || "", r.name, r.set, r.number, r.rarity, condName,
+      printing, r.language, r.qty, r.price != null ? Number(r.price).toFixed(2) : ""
+    ].map(csvCell).join(","));
+  });
+  return lines.join("\n");
+}
+function downloadCsv(name, csv){
+  var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+}
+$("exportBtn").addEventListener("click", function(){
+  var b = activeBinder();
+  if (!b.rows.length){ toast("This binder is empty — scan something first"); return; }
+  var rows = b.rows.map(function(r){ var c = {}; for (var k in r) c[k] = r[k]; return c; });
+  rows.forEach(function(r){ r.tcgId = r.tcgId || ""; });
+  var range = dateRangeLabel(rows);
+  var csv = buildCsv(rows);
+  var fname = "tcgplayer-" + b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + new Date().toISOString().slice(0,10) + ".csv";
+  downloadCsv(fname, csv);
+  state.archives.unshift({
+    id: uid(), binderName: b.name, range: range, exportedAt: Date.now(),
+    cards: rows.reduce(function(a,r){ return a+r.qty; }, 0),
+    value: rows.reduce(function(a,r){ return a+(r.price||0)*r.qty; }, 0),
+    rows: rows
+  });
+  b.rows = [];
+  renderBinders(); renderList(); renderArchive();
+  toast("Exported “" + b.name + "” (" + range + ")");
+  showView("archive");
+});
+
+/* rows need a TCGplayer Id when derivable: captured at add time */
+var _addRow = addRow;
+addRow = function(card, o){
+  var before = activeBinder().rows.length;
+  _addRow(card, o);
+  var rows = activeBinder().rows;
+  for (var i=0;i<rows.length;i++){
+    if (rows[i].cardId===card.id && !rows[i].tcgId) rows[i].tcgId = tcgId(card);
+  }
+  if (rows.length !== before) renderList();
+};
+
+function renderArchive(){
+  var wrap = $("archiveList");
+  $("archiveEmpty").style.display = state.archives.length ? "none" : "block";
+  wrap.innerHTML = state.archives.map(function(a){
+    return '<div class="arch"><h3>'+esc(a.binderName)+'</h3>'+
+      '<div class="mt">Scanned over <b style="color:var(--ink)">'+esc(a.range)+'</b> · exported '+new Date(a.exportedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})+'</div>'+
+      '<div class="rowline"><span>'+a.cards+' cards</span><b>'+money(a.value)+'</b></div>'+
+      '<button class="btn block" data-dl="'+a.id+'" style="margin-top:11px;min-height:44px">Download CSV again</button></div>';
+  }).join("");
+  wrap.querySelectorAll("[data-dl]").forEach(function(b){
+    b.addEventListener("click", function(){
+      var a = state.archives.filter(function(x){ return x.id===b.getAttribute("data-dl"); })[0];
+      if (a) downloadCsv("tcgplayer-" + a.binderName.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-" + new Date(a.exportedAt).toISOString().slice(0,10) + ".csv", buildCsv(a.rows));
+    });
+  });
+}
+
+/* ================= settings ================= */
+function bindSetting(id, key, parse){
+  var el = $(id);
+  el.value = state.settings[key];
+  el.addEventListener("change", function(){
+    var v = parse ? parse(el.value) : parseFloat(el.value);
+    if (v != null && !isNaN(v)) state.settings[key] = v;
+    el.value = state.settings[key];
+    persist();
+    toast("Setting saved");
+  });
+}
+bindSetting("setFeePct","feePct"); bindSetting("setFeeLow","feeLow"); bindSetting("setFeeHigh","feeHigh");
+bindSetting("setShip","ship"); bindSetting("setTax","taxRate"); bindSetting("setMargin","margin");
+bindSetting("setLP","lpPct"); bindSetting("setMP","mpPct"); bindSetting("setHP","hpPct");
+$("setApiKey").value = state.settings.apiKey || "";
+$("setApiKey").addEventListener("change", function(){ state.settings.apiKey = this.value.trim(); persist(); toast("API key " + (this.value.trim() ? "saved" : "cleared")); });
+
+/* ================= init ================= */
+renderBinders();
+renderList();
+</script>
+</body>
+</html>
