@@ -103,6 +103,8 @@
   .queue-item .qi-mt{font-size:12px;color:var(--ink2)}
   .flag{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:99px;background:var(--warn-soft);color:var(--warn);white-space:nowrap}
   .flag.ok{background:var(--good-soft);color:var(--good)}
+  .flag-amber{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent-ink);white-space:nowrap}
+  .research-note{font-size:12px;color:var(--ink2);margin-top:7px}
 
   /* detail sheet */
   .sheet-veil{position:fixed;inset:0;background:rgba(8,9,10,.55);z-index:50;display:none;align-items:flex-end;justify-content:center}
@@ -389,10 +391,16 @@
     <div class="field-lbl">Printing</div>
     <div class="chips" id="dPrintings"></div>
 
+    <div id="dPatternsWrap" style="display:none">
+      <div class="field-lbl">Holo pattern</div>
+      <div class="chips" id="dPatterns"></div>
+    </div>
+
     <div class="field-lbl">Language</div>
     <div class="chips" id="dLanguages"></div>
 
     <div class="field-lbl">Tap a condition to add it</div>
+    <div id="dResearch"></div>
     <div class="cond-table" id="dConds"></div>
     <div class="snap-note" id="dSnapNote"></div>
 
@@ -429,7 +437,8 @@
     </div>
     <div class="sumline"><span>Unit price (snapshot)</span><b id="qUnit">$0.00</b></div>
     <div class="sumline"><span>Line total</span><b id="qLine">$0.00</b></div>
-    <div class="sumline"><span>WorthIt buy-at-or-under (each)</span><b id="qWorth">$0.00</b></div>
+    <div class="sumline"><span>WorthIt buy-at-or-under (each) <span id="qResearchFlag" style="display:none"><span class="flag-amber">Price needs research</span></span></span><b id="qWorth">$0.00</b></div>
+    <div class="research-note" id="qResearchNote" style="display:none;margin-top:0">TCGplayer prices this pattern under standard Holofoil — verify the market before listing.</div>
     <button class="btn primary block" id="qConfirm" style="margin-top:12px">Add to binder</button>
   </div>
 </div>
@@ -459,6 +468,45 @@ var LANGUAGES = ["English","Japanese","German","French","Spanish","Italian","Kor
 var PRINT_LABEL = { normal:"Normal", holofoil:"Holofoil", reverseHolofoil:"Reverse Holofoil",
   "1stEditionNormal":"1st Edition", "1stEditionHolofoil":"1st Edition Holofoil",
   unlimited:"Unlimited", unlimitedHolofoil:"Unlimited Holofoil" };
+var HOLO_PATTERNS = ["Standard","Cosmos Holo","Cracked Ice Holo"];
+function isHoloPatternPrinting(key){
+  return !!key && key.toLowerCase().indexOf("holofoil") >= 0 && key.toLowerCase() !== "reverseholofoil";
+}
+function patternOf(o){ return o && o.holoPattern ? o.holoPattern : "Standard"; }
+function hasSpecialPattern(o){ return patternOf(o) !== "Standard"; }
+/* TCGplayer usually lumps special holo patterns (Cosmos, Cracked Ice) into the
+   standard Holofoil price. When the price data does carry a distinct entry for
+   the pattern, return its key so that pattern's own price can be used. */
+function patternPriceKey(card, pattern){
+  if (!card || !pattern || pattern === "Standard") return null;
+  var token = pattern.toLowerCase().replace(/\s+holo$/, "").replace(/[^a-z]/g, "");
+  if (!token) return null;
+  var pr = (card.tcgplayer && card.tcgplayer.prices) || {};
+  var keys = Object.keys(pr);
+  for (var i = 0; i < keys.length; i++){
+    if (keys[i].toLowerCase().indexOf(token) >= 0 && pr[keys[i]] && pr[keys[i]].market != null) return keys[i];
+  }
+  return null;
+}
+/* The pricing key to price from: the pattern's own key when TCGplayer publishes
+   a distinct price for the selected pattern, otherwise the selected printing. */
+function effectivePriceKey(card, o){
+  var p = patternOf(o);
+  if (p !== "Standard"){
+    var pk = patternPriceKey(card, p);
+    if (pk) return pk;
+  }
+  return o.printing;
+}
+/* The amber "Price needs research" flag applies ONLY when a special pattern is
+   chosen and TCGplayer publishes no distinct price for it (the card is priced
+   under standard Holofoil instead). A pattern with its own price never flags. */
+function needsResearch(o, card){
+  if (!hasSpecialPattern(o)) return false;
+  if (o && o.patternPriced) return false;
+  if (card) return !patternPriceKey(card, patternOf(o));
+  return true;
+}
 
 function uid(){ return Math.random().toString(36).slice(2,9) + Date.now().toString(36); }
 
@@ -629,6 +677,7 @@ function openDetail(card, opts){
     card: card,
     candidates: opts.candidates || null,
     printing: keys.indexOf("holofoil")>=0 ? "holofoil" : (keys[0] || "normal"),
+    holoPattern: "Standard",
     language: "English",
     snapshotAt: Date.now(),
     queueId: opts.queueId || null
@@ -659,8 +708,25 @@ function renderDetail(){
     return '<button class="chip'+(k===detail.printing?" on":"")+'" data-print="'+esc(k)+'">'+esc(PRINT_LABEL[k]||k)+(p&&p.market!=null? "<small>"+money(p.market)+"</small>":"")+"</button>";
   }).join("") : '<span style="font-size:13px;color:var(--ink2)">No TCGplayer pricing published for this printing.</span>';
   $("dPrintings").querySelectorAll("[data-print]").forEach(function(b){
-    b.addEventListener("click", function(){ detail.printing = b.getAttribute("data-print"); renderDetail(); });
+    b.addEventListener("click", function(){ detail.printing = b.getAttribute("data-print"); detail.holoPattern = "Standard"; renderDetail(); });
   });
+
+  /* The pattern picker exists only when this card genuinely has a holo-type
+     printing in its TCGplayer price data and that printing is the selected
+     one — it never appears on cards with no holofoil printing at all. */
+  var hasHoloPrinting = keys.some(function(k){ return isHoloPatternPrinting(k); });
+  var showPatterns = hasHoloPrinting && isHoloPatternPrinting(detail.printing);
+  $("dPatternsWrap").style.display = showPatterns ? "block" : "none";
+  if (showPatterns){
+    $("dPatterns").innerHTML = HOLO_PATTERNS.map(function(p){
+      var pk = patternPriceKey(c, p);
+      var tag = pk ? "<small>"+money(c.tcgplayer.prices[pk].market)+"</small>" : "";
+      return '<button class="chip'+(p===detail.holoPattern?" on":"")+'" data-pattern="'+esc(p)+'">'+esc(p)+tag+"</button>";
+    }).join("");
+    $("dPatterns").querySelectorAll("[data-pattern]").forEach(function(b){
+      b.addEventListener("click", function(){ detail.holoPattern = b.getAttribute("data-pattern"); renderDetail(); });
+    });
+  }
 
   $("dLanguages").innerHTML = LANGUAGES.map(function(l){
     return '<button class="chip'+(l===detail.language?" on":"")+'" data-lang="'+esc(l)+'">'+esc(l)+"</button>";
@@ -670,8 +736,9 @@ function renderDetail(){
   });
 
   var t = new Date(detail.snapshotAt);
+  var priceKey = effectivePriceKey(c, detail);
   $("dConds").innerHTML = CONDITIONS.map(function(cond){
-    var price = condPrice(c, detail.printing, cond);
+    var price = condPrice(c, priceKey, cond);
     var w = price ? worthIt(price) : 0;
     return '<button class="cond-row" data-cond="'+cond.key+'" '+(price==null?"disabled style=opacity:.45":"")+'>' +
       '<span class="cond-ab">'+cond.ab+'</span>' +
@@ -686,6 +753,11 @@ function renderDetail(){
       openQty(cond);
     });
   });
+  var flagged = needsResearch(detail, c);
+  $("dResearch").innerHTML = flagged
+    ? '<div style="margin:2px 0 8px"><span class="flag-amber">Price needs research</span></div>' +
+      '<div class="research-note" style="margin:0 0 9px">TCGplayer prices this pattern under standard Holofoil — verify the market before listing. Prices below are the standard Holofoil market price.</div>'
+    : "";
   $("dSnapNote").textContent = "Prices snapshotted " + t.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}) +
     " from TCGplayer market (NM). Played conditions are estimated from NM with your Settings factors.";
 
@@ -703,6 +775,7 @@ function renderDetail(){
         detail.card = alt;
         var k = printingKeys(alt);
         detail.printing = k.indexOf("holofoil")>=0 ? "holofoil" : (k[0]||"normal");
+        detail.holoPattern = "Standard";
         renderDetail();
         toast("Switched to " + alt.name);
       });
@@ -722,11 +795,14 @@ $("dNotCard").addEventListener("click", function(){
 var qtyCtx = null; // {cond, price}
 function openQty(cond){
   if (!detail) return;
-  var price = condPrice(detail.card, detail.printing, cond);
+  var price = condPrice(detail.card, effectivePriceKey(detail.card, detail), cond);
   if (price == null) return;
   qtyCtx = { cond: cond, price: price, qty: 1 };
+  var flagged = needsResearch(detail, detail.card);
   $("qTitle").textContent = "Add " + cond.name;
-  $("qMeta").textContent = detail.card.name + " · " + (PRINT_LABEL[detail.printing]||detail.printing) + " · " + detail.language;
+  $("qMeta").textContent = detail.card.name + " · " + (PRINT_LABEL[detail.printing]||detail.printing) + (hasSpecialPattern(detail) ? " (" + detail.holoPattern + ")" : "") + " · " + detail.language;
+  $("qResearchFlag").style.display = flagged ? "inline" : "none";
+  $("qResearchNote").style.display = flagged ? "block" : "none";
   renderQty();
   $("qtyVeil").classList.add("on");
 }
@@ -746,7 +822,7 @@ $("qtyVeil").addEventListener("click", function(e){ if (e.target===this) this.cl
 $("qConfirm").addEventListener("click", function(){
   if (!detail || !qtyCtx) return;
   addRow(detail.card, {
-    printing: detail.printing, language: detail.language,
+    printing: detail.printing, holoPattern: patternOf(detail), language: detail.language,
     condition: qtyCtx.cond.name, price: qtyCtx.price,
     worthItEach: worthIt(qtyCtx.price), qty: qtyCtx.qty
   });
@@ -761,14 +837,14 @@ function addRow(card, o){
   var b = activeBinder();
   for (var i=0;i<b.rows.length;i++){
     var r = b.rows[i];
-    if (r.cardId===card.id && r.printing===o.printing && r.condition===o.condition && r.language===o.language){
+    if (r.cardId===card.id && r.printing===o.printing && r.condition===o.condition && r.language===o.language && patternOf(r)===(o.holoPattern || "Standard")){
       r.qty += o.qty; r.addedAt = Date.now(); renderBinders(); renderList(); return;
     }
   }
   b.rows.push({
     id: uid(), cardId: card.id, name: card.name, set: card.set && card.set.name || "",
     setId: card.set && card.set.id || "", number: card.number || "", rarity: card.rarity || "",
-    printing: o.printing, language: o.language, condition: o.condition,
+    printing: o.printing, holoPattern: patternOf(o), patternPriced: !!patternPriceKey(card, o.holoPattern), language: o.language, condition: o.condition,
     price: o.price, worthItEach: o.worthItEach, qty: o.qty,
     img: card.images && card.images.small || "", addedAt: Date.now()
   });
@@ -1170,7 +1246,7 @@ function renderList(){
     var cardLike = { name: r.name, images: { small: r.img } };
     return '<div class="row-item">'+cardImg(cardLike)+
       '<div class="ri-main"><div class="ri-nm">'+esc(r.name)+'</div>'+
-      '<div class="ri-mt">'+esc(r.set)+' #'+esc(r.number)+' · '+esc(PRINT_LABEL[r.printing]||r.printing)+'<br>'+esc(r.condition)+' · '+esc(r.language)+'</div></div>'+
+      '<div class="ri-mt">'+esc(r.set)+' #'+esc(r.number)+' · '+esc(PRINT_LABEL[r.printing]||r.printing)+(hasSpecialPattern(r) ? ' ('+esc(r.holoPattern)+')' : '')+'<br>'+esc(r.condition)+' · '+esc(r.language)+(needsResearch(r) ? '<br><span class="flag-amber">Price needs research</span>' : '')+'</div></div>'+
       '<div class="qty-ctl"><button class="mini-btn" data-dec="'+r.id+'" aria-label="One less">−</button><span class="qv2">'+r.qty+'</span><button class="mini-btn" data-inc="'+r.id+'" aria-label="One more">+</button></div>'+
       '<div class="ri-pr"><div class="p">'+money((r.price||0)*r.qty)+'</div><div class="q">'+money(r.price)+' ea</div></div>'+
       '<button class="mini-btn" data-del="'+r.id+'" aria-label="Remove row" style="color:var(--warn)">×</button></div>';
@@ -1212,7 +1288,7 @@ function buildCsv(rows){
   var lines = [head.join(",")];
   rows.forEach(function(r){
     var condName = r.condition;
-    var printing = PRINT_LABEL[r.printing] || r.printing;
+    var printing = (PRINT_LABEL[r.printing] || r.printing) + (hasSpecialPattern(r) ? " (" + r.holoPattern + ")" : "");
     lines.push([
       r.tcgId || "", r.name, r.set, r.number, r.rarity, condName,
       printing, r.language, r.qty, r.price != null ? Number(r.price).toFixed(2) : ""
@@ -1268,6 +1344,12 @@ function renderArchive(){
     return '<div class="arch"><h3>'+esc(a.binderName)+'</h3>'+
       '<div class="mt">Scanned over <b style="color:var(--ink)">'+esc(a.range)+'</b> · exported '+new Date(a.exportedAt).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})+'</div>'+
       '<div class="rowline"><span>'+a.cards+' cards</span><b>'+money(a.value)+'</b></div>'+
+      (function(){
+        var fr = (a.rows || []).filter(function(r){ return needsResearch(r); });
+        if (!fr.length) return "";
+        var fc = fr.reduce(function(s,r){ return s + (r.qty || 1); }, 0);
+        return '<div class="rowline"><span><span class="flag-amber">Price needs research</span></span><b>'+fc+' card'+(fc===1?"":"s")+' flagged</b></div>';
+      })()+
       '<button class="btn block" data-dl="'+a.id+'" style="margin-top:11px;min-height:44px">Download CSV again</button></div>';
   }).join("");
   wrap.querySelectorAll("[data-dl]").forEach(function(b){
