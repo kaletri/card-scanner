@@ -366,7 +366,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16e</p>
+      <p class="build-version">build 2026-10-16f</p>
     </section>
   </main>
 
@@ -1071,17 +1071,22 @@ function scannedPhotoHtml(src, compact){
   if (compact) return '<img class="scan-source-thumb" src="' + esc(src) + '" alt="Scanned photo">';
   return '<div class="scan-photo"><img src="' + esc(src) + '" alt="Scanned photo"><div class="scan-photo-label"><b>Scanned photo</b>Image used for this identification</div></div>';
 }
-function ocrPrepBand(source, yFrac, hFrac){
-  // crop a horizontal band, upscale 2x, then grayscale + contrast-stretch per pixel
-  // (no ctx.filter — iOS support is inconsistent)
+function ocrPrepBand(source, yFrac, hFrac, xFrac, wFrac){
+  // crop a band, upscale 2x, then grayscale + contrast-stretch per pixel
+  // (no ctx.filter — iOS support is inconsistent). xFrac/wFrac optionally
+  // narrow the crop horizontally (fractions of the source width); omitting
+  // them keeps the full width.
   var sw = source.width, sh = source.height;
+  var xf = (xFrac == null ? 0 : xFrac), wf = (wFrac == null ? 1 : wFrac);
+  var sx = Math.min(sw - 1, Math.round(sw * xf));
+  var bw = Math.max(1, Math.round(sw * wf));
   var sy = Math.min(sh - 1, Math.round(sh * yFrac));
   var bh = Math.max(1, Math.round(sh * hFrac));
   var c = document.createElement("canvas");
-  c.width = sw * 2;
+  c.width = bw * 2;
   c.height = bh * 2;
   var ctx = c.getContext("2d");
-  ctx.drawImage(source, 0, sy, sw, bh, 0, 0, c.width, c.height);
+  ctx.drawImage(source, sx, sy, bw, bh, 0, 0, c.width, c.height);
   var img = ctx.getImageData(0, 0, c.width, c.height);
   var d = img.data;
   for (var i = 0; i < d.length; i += 4){
@@ -1250,6 +1255,64 @@ function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan,
     }).catch(function(){ tryNext(i + 1); });
   })(0);
 }
+/* ---- Number-first identification ----
+   The printed collector number uses a plain font, so its OCR read is far
+   more reliable than the stylized name. When a clean number + set size was
+   read off the strip (e.g. 123/214), query number + set.printedTotal BEFORE
+   any name-based tier: the pair is specific enough that a single hit is
+   accepted outright, and multiple hits are ranked against the (possibly
+   garbled) name read. Only an empty number query falls back to the
+   name-based tiers via onMiss. */
+function commonPrefixLen(a, b){
+  var n = Math.min(a.length, b.length), i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+/* Rank same-number results against the OCR name read. Substring and
+   shared-prefix matching, not just whole words: a partial read like "Dug"
+   sits inside "Dugtrio", and a garbled read like "Dugtrighi" shares a long
+   prefix with "Dugtrio" even though neither contains the other. */
+function rankNumberMatches(cards, candidates){
+  var needles = [];
+  (candidates || []).forEach(function(c){
+    String(c).toLowerCase().split(/[^a-zà-ÿ0-9]+/).forEach(function(w){
+      if (w.length >= 3) needles.push(w);
+    });
+  });
+  var scored = cards.map(function(c, idx){
+    var toks = String(c.name || "").toLowerCase().split(/[^a-zà-ÿ0-9]+/).filter(function(t){ return !!t; });
+    var s = 0;
+    needles.forEach(function(w){
+      toks.forEach(function(t){
+        if (t === w) s += 3;
+        else if (t.indexOf(w) >= 0) s += 2;
+        else {
+          var cp = commonPrefixLen(w, t);
+          if (cp >= 4 && cp >= Math.min(w.length, t.length) * 0.6) s += 2;
+          else if (w.indexOf(t) === 0) s += 1;
+        }
+      });
+    });
+    return { card: c, score: s, idx: idx };
+  });
+  scored.sort(function(a, b){ return (b.score - a.score) || (a.idx - b.idx); });
+  return scored;
+}
+function tryNumberFirstQueries(number, setSize, candidates, onMiss, scanThumb){
+  var q = 'number:"' + number + '" set.printedTotal:' + setSize;
+  apiFetchWithRetries(q, 24).then(function(cards){
+    var matching = (cards || []).filter(function(c){ return numberMatches(c.number, number); });
+    if (!matching.length){ onMiss(); return; }
+    var readLabel = (candidates && candidates[0]) || (number + "/" + setSize);
+    scanning = false;
+    if (matching.length === 1){
+      handleMatch(matching, readLabel, null, scanThumb);
+      return;
+    }
+    var ranked = rankNumberMatches(matching, candidates);
+    handleMatch(ranked.map(function(x){ return x.card; }), readLabel, null, scanThumb);
+  }).catch(function(){ onMiss(); });
+}
 function tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan, scanThumb){
   var jobs = [];
   candidates.forEach(function(cand){
@@ -1406,19 +1469,34 @@ function identifyCanvas(source, sourceLabel){
   /* The embedded index is ready before any scan can begin. */
   var nameIndexForScan = cardNameIndex;
   // Read the independent name band and collector-number strip in parallel.
+  // The name band crops to the center 60% horizontally: the full-width band
+  // also catches the "STAGE 1" box on the left and "HP 90" on the right,
+  // which OCR mangles into the name read. The number strip keeps full width.
   var band = null;
   var strip = null;
-  try { band = ocrPrepBand(src, 0, 0.16); } catch (e) { band = null; }
+  try { band = ocrPrepBand(src, 0, 0.16, 0.20, 0.60); } catch (e) { band = null; }
   try { strip = ocrPrepBand(src, 0.86, 0.14); } catch (e) { strip = null; }
   var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
   var numRun = strip ? ocrRecognize(strip, 3).catch(function(){ return null; }) : Promise.resolve(null);
   Promise.all([bandRun, numRun]).then(function(reads){
     var bandText = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var candidates = bandNameCandidates(bandText);
-    if (!candidates.length){ wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb); return; }
     var numText = (reads[1] && reads[1].data && reads[1].data.text) || "";
     var parsed = parsePrintedNumber(numText);
-    tryBandQueries(candidates, parsed ? parsed.number : null, parsed ? parsed.setSize : null, sourceLabel, nameIndexForScan, scanThumb);
+    var number = parsed ? parsed.number : null;
+    var setSize = parsed ? parsed.setSize : null;
+    function nameFlow(){
+      if (!candidates.length){ wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb); return; }
+      tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan, scanThumb);
+    }
+    /* Number-first: a clean collector number + set size from the strip is
+       queried before any name tier; the name flow is only the fallback. */
+    if (number && setSize){
+      setScanStatus('<span class="spinner"></span>Read number <b>' + esc(number) + "/" + esc(setSize) + '</b> — looking it up…');
+      tryNumberFirstQueries(number, setSize, candidates, nameFlow, scanThumb);
+    } else {
+      nameFlow();
+    }
   }).catch(function(){
     wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb);
   });
