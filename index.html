@@ -376,7 +376,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-16m</p>
+      <p class="build-version">build 2026-10-18a</p>
     </section>
   </main>
 
@@ -1006,7 +1006,7 @@ $("searchBtn").addEventListener("click", doSearch);
 $("searchInput").addEventListener("keydown", function(e){ if (e.key==="Enter") doSearch(); });
 
 /* ================= camera + OCR ================= */
-var stream = null, scanning = false;
+var stream = null, scanning = false, streamReadyAt = 0;
 
 /* The complete catalog-name index is embedded so the single-file deployment
    always has fuzzy correction available synchronously, with no asset fetch or
@@ -1071,9 +1071,28 @@ function startCamera(){
     setScanStatus("Live camera isn't available in this browser view. Use <b>Use a photo</b> instead — it reads the card the same way.", true);
     return Promise.reject(new Error("no camera"));
   }
-  return navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+  /* Ask for a high-resolution stream: with no size constraint the browser
+     hands back its low default (often 640x480), and at that size the name
+     band and the tiny collector-number digits are too coarse for OCR to
+     read anything but gibberish — the photo path works because uploads
+     arrive at 1400px+. "ideal" keeps this a request, not a demand, so
+     cameras that can't deliver it still open. */
+  return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 } }, audio: false })
     .then(function(s){
       stream = s;
+      streamReadyAt = Date.now() + 900;
+      /* Continuous autofocus where the platform offers it (Chrome on
+         Android does; iOS Safari rejects the constraint — caught and
+         ignored, its tap-to-focus still applies). A frame grabbed while
+         the lens is still hunting is a blurry frame, and blurry OCR is
+         gibberish OCR. */
+      try {
+        var track = s.getVideoTracks && s.getVideoTracks()[0];
+        if (track && track.applyConstraints){
+          var p = track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          if (p && p.catch) p.catch(function(){});
+        }
+      } catch (e) {}
       var v = $("camVideo");
       v.srcObject = s; v.style.display = "block";
       $("finderHint").style.display = "none";
@@ -1097,9 +1116,42 @@ function stopCamera(){
 }
 $("stopCamBtn").addEventListener("click", stopCamera);
 
+/* Map the on-screen guide frame back into video pixels. The preview is
+   object-fit: cover inside the finder box, so what the user sees (and
+   aligns the card to) is a center-cropped, scaled window of the stream —
+   NOT the full frame. Capturing the full frame anyway put the card at a
+   different position and scale than the user framed it, so the OCR name
+   band and number strips landed on table and background and read
+   gibberish. Returns the guide frame's rect in video pixels, slightly
+   expanded so a card edge resting on the frame line isn't clipped, or
+   null when the geometry can't be trusted (caller uses the full frame). */
+function guideRectInVideo(vw, vh){
+  var box = $("finder").getBoundingClientRect();
+  var cw = box.width, ch = box.height;
+  if (!cw || !ch || !vw || !vh) return null;
+  var scale = Math.max(cw / vw, ch / vh); /* object-fit: cover */
+  var offX = (cw - vw * scale) / 2, offY = (ch - vh * scale) / 2;
+  /* .finder .frame { inset: 9% 11% } — top/bottom 9% of the box height,
+     left/right 11% of the box width — plus a 3% breathing margin. */
+  var fx0 = cw * 0.11 - cw * 0.03, fx1 = cw * 0.89 + cw * 0.03;
+  var fy0 = ch * 0.09 - ch * 0.03, fy1 = ch * 0.91 + ch * 0.03;
+  var x0 = Math.max(0, Math.floor((fx0 - offX) / scale));
+  var y0 = Math.max(0, Math.floor((fy0 - offY) / scale));
+  var x1 = Math.min(vw, Math.ceil((fx1 - offX) / scale));
+  var y1 = Math.min(vh, Math.ceil((fy1 - offY) / scale));
+  if (x1 - x0 < 50 || y1 - y0 < 50) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
 function captureFrame(){
   var v = $("camVideo");
   var c = document.createElement("canvas");
+  var rect = null;
+  try { rect = guideRectInVideo(v.videoWidth, v.videoHeight); } catch (e) { rect = null; }
+  if (rect){
+    c.width = rect.w; c.height = rect.h;
+    c.getContext("2d").drawImage(v, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
+    return c;
+  }
   c.width = v.videoWidth; c.height = v.videoHeight;
   c.getContext("2d").drawImage(v, 0, 0);
   return c;
@@ -1866,6 +1918,16 @@ $("scanBtn").addEventListener("click", function(){
     return;
   }
   if (!$("camVideo").videoWidth){ setScanStatus("Camera is still warming up — one more second.", false); return; }
+  /* A tap in the first moments after the camera opens grabs a frame
+     while autofocus and exposure are still settling — the classic
+     blurry-gibberish read. Wait out the remainder of the settle window
+     instead of capturing immediately; the tap still produces a scan. */
+  var wait = streamReadyAt - Date.now();
+  if (wait > 0){
+    setScanStatus("Hold it steady — letting the camera focus…", false);
+    setTimeout(function(){ if (stream) identifyCanvas(captureFrame(), "frame"); }, wait);
+    return;
+  }
   identifyCanvas(captureFrame(), "frame");
 });
 $("uploadBtn").addEventListener("click", function(){ $("photoInput").click(); });
