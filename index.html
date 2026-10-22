@@ -374,9 +374,15 @@
       <div class="set-group">
         <div class="set-row"><div><div class="sl">Pokemon TCG API key</div><div class="sd">Optional. A free key from pokemontcg.io raises the rate limit for heavy batch sessions.</div></div><input type="text" id="setApiKey" placeholder="Paste key (optional)"></div>
       </div>
+
+      <div class="field-lbl">Visual backend (home PC)</div>
+      <div class="set-group">
+        <div class="set-row"><div><div class="sl">Backend URL</div><div class="sd">Your PC identifies cards by their art (DINOv2) — much more accurate than on-device text reading. Clear the field to scan on-device only.</div></div><input type="text" id="setBackendUrl" placeholder="https://…ts.net"></div>
+        <div class="set-row"><div><div class="sl">Connection</div><div class="sd" id="backendStatus">Not tested yet.</div></div><button class="btn" id="testBackendBtn" style="min-height:40px;padding:9px 14px">Test connection</button></div>
+      </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-18a</p>
+      <p class="build-version">build 2026-10-21a</p>
     </section>
   </main>
 
@@ -546,7 +552,7 @@ function uid(){ return Math.random().toString(36).slice(2,9) + Date.now().toStri
 
 var state = {
   settings: { feePct:12.35, feeLow:0.30, feeHigh:0.40, ship:1.00, taxRate:25, margin:0,
-              lpPct:85, mpPct:70, hpPct:55, apiKey:"" },
+              lpPct:85, mpPct:70, hpPct:55, apiKey:"", backendUrl:"https://desktop-7qmd8qm.tailc15c88.ts.net" },
   binders: [], activeBinderId: null, archives: [],
   mode: "single", rapidLog: false,
   queue: []  // batch holding queue: {id, card, candidates, flagged, note}
@@ -874,9 +880,10 @@ $("dNotCard").addEventListener("click", function(){
    detail sheet with the full candidate list still attached, so "Not this
    card?" keeps working from there too. */
 var pickCtx = null; // {cards, scanThumb}
-function openCandidatePicker(cards, readName, scanThumb){
+function openCandidatePicker(cards, readName, scanThumb, noteText){
   pickCtx = { cards: cards, scanThumb: scanThumb || null };
-  $("pickNote").innerHTML = "Read <b>" + esc(readName) + "</b>, but a few cards sit one digit apart and the name doesn't settle it. Tap the one you scanned.";
+  $("pickNote").innerHTML = noteText ? esc(noteText) :
+    "Read <b>" + esc(readName) + "</b>, but a few cards sit one digit apart and the name doesn't settle it. Tap the one you scanned.";
   $("pickScannedPhoto").innerHTML = scannedPhotoHtml(scanThumb, false);
   $("pickList").innerHTML = cards.map(function(c, i){
     var price = null, keys = printingKeys(c);
@@ -1749,68 +1756,192 @@ function handleOcrFailure(sourceLabel, msg){
   }
 }
 
-function identifyCanvas(source, sourceLabel){
-  if (scanning) return;
-  scanning = true;
-  setScanStatus('<span class="spinner"></span>Reading the card name…');
+/* ================= visual backend (home PC) =================
+   The cropped card image is sent to the DINOv2 service on the home PC,
+   which answers with its top visual matches (cosine similarity, 1.0 =
+   identical art). A confident answer replaces the name-band OCR read
+   entirely; anything less — a weak score, an empty answer, a timeout,
+   an unreachable PC — falls back to the on-device OCR pipeline below,
+   exactly as scans behaved before the backend existed. The collector
+   number read from the bottom strips still runs either way: when it
+   agrees with a lower-ranked visual candidate, that candidate wins. */
+var VISUAL_TIMEOUT_MS = 8000;
+var VISUAL_CONFIDENT_SCORE = 0.5;
+function backendBase(){
+  return (state.settings.backendUrl || "").trim().replace(/\/+$/, "");
+}
+/* Resolves to the backend's results array, or null on any failure:
+   no URL configured, timeout, HTTP error, or an empty result list. */
+function visualIdentify(canvas){
+  var base = backendBase();
+  if (!base) return Promise.resolve(null);
+  return new Promise(function(resolve){
+    var settled = false;
+    function finish(v){ if (!settled){ settled = true; resolve(v); } }
+    try {
+      canvas.toBlob(function(blob){
+        if (!blob){ finish(null); return; }
+        var fd = new FormData();
+        fd.append("photo", blob, "card.jpg");
+        var controller = new AbortController();
+        var timer = setTimeout(function(){ controller.abort(); }, VISUAL_TIMEOUT_MS);
+        fetch(base + "/identify?top_k=10", { method: "POST", body: fd, signal: controller.signal }).then(function(r){
+          clearTimeout(timer);
+          if (!r.ok) throw new Error("Backend returned " + r.status);
+          return r.json();
+        }).then(function(j){
+          var res = (j && Array.isArray(j.results)) ? j.results.filter(function(x){ return x && x.id; }) : [];
+          finish(res.length ? res : null);
+        }).catch(function(){
+          clearTimeout(timer);
+          finish(null);
+        });
+      }, "image/jpeg", 0.85);
+    } catch (e) { finish(null); }
+  });
+}
+/* Full catalog detail for one backend result id ("sm8-123"), fetched
+   the same way every other candidate's detail is: a catalog query whose
+   rows carry pricing, images, and set data. Null when unfetchable. */
+function fetchCardById(id){
+  return apiFetchWithRetries('id:"' + String(id).replace(/"/g, "") + '"', 1).then(function(cards){
+    return (cards && cards.length) ? cards[0] : null;
+  }).catch(function(){ return null; });
+}
+function fetchVisualDetails(orderedResults){
+  return Promise.all(orderedResults.map(function(r){ return fetchCardById(r.id); })).then(function(details){
+    var out = [];
+    orderedResults.forEach(function(r, i){ if (details[i]) out.push(details[i]); });
+    return out;
+  });
+}
+/* Present a visual match the way handleMatch presents an OCR match:
+   single mode opens the detail sheet (or the picker when weak); batch
+   mode rapid-logs a confident hit or queues it for a confirm tap. */
+function presentVisualMatch(cards, scanThumb, weak){
+  var best = cards[0];
+  if (!weak) setScanStatus("Identified by your PC — <b>" + esc(best.name) + "</b>. Confirm it's the right card.");
+  if (state.mode === "batch"){
+    if (state.rapidLog && !weak){
+      var keys = printingKeys(best);
+      var pk = keys.indexOf("holofoil")>=0 ? "holofoil" : (keys[0]||"normal");
+      var condName = $("rapidCond").value;
+      var cond = CONDITIONS.filter(function(x){ return x.name===condName; })[0];
+      var price = condPrice(best, pk, cond);
+      if (price != null){
+        addRow(best, { printing: pk, language: "English", condition: condName, price: price, worthItEach: worthIt(price), qty: 1 });
+        toast("Auto-added " + best.name + " (" + cond.ab + ")");
+      } else {
+        pushQueue(best, cards, true, "No market price — needs a look", scanThumb);
+      }
+    } else {
+      pushQueue(best, cards, weak, weak ? "Weak visual match — confirm" : "", scanThumb);
+      toast("Queued: " + best.name);
+    }
+    renderQueue();
+  } else if (weak){
+    setScanStatus("Your PC's visual match wasn't confident — pick the right card.");
+    openCandidatePicker(cards, best.name, scanThumb,
+      "Your PC found look-alike cards but none scored as a confident visual match. Tap the card you scanned.");
+  } else {
+    openDetail(best, { candidates: cards, scanThumb: scanThumb });
+  }
+}
+/* Weak visual result, single mode: the picker shows the visual top-K,
+   with any catalog hits from the on-device name-band read merged in
+   behind them (deduplicated, visual order first). */
+function weakVisualPicker(visualCards, src, number, setSize, scanThumb){
+  function show(extra){
+    var seen = {}, merged = [];
+    visualCards.concat(extra || []).forEach(function(c){
+      if (c && c.id && !seen[c.id]){ seen[c.id] = 1; merged.push(c); }
+    });
+    scanning = false;
+    presentVisualMatch(merged, scanThumb, true);
+  }
+  if (typeof Tesseract === "undefined"){ show([]); return; }
+  var band = null;
+  try { band = ocrPrepBand(src, 0.05, 0.11, 0.20, 0.60); } catch (e) { band = null; }
+  if (!band){ show([]); return; }
+  ocrRecognize(band, 3).then(function(res){
+    var candidates = bandNameCandidates((res && res.data && res.data.text) || "");
+    if (!candidates.length){ show([]); return; }
+    var found = [];
+    var jobs = [];
+    candidates.slice(0, 3).forEach(function(cand){
+      var cj = queryJobsForName(cand, number, setSize);
+      if (cj.length) jobs.push(cj[0].q);
+    });
+    (function next(i){
+      if (i >= jobs.length || found.length >= 6){ show(found); return; }
+      apiFetchWithRetries(jobs[i], 12).then(function(cards){
+        scoreResults(cards || [], candidates, number, setSize).forEach(function(x){
+          if (number || x.score > 0) found.push(x.card);
+        });
+        next(i + 1);
+      }).catch(function(){ next(i + 1); });
+    })(0);
+  }).catch(function(){ show([]); });
+}
+function presentVisualResults(results, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize){
+  /* Confidence is judged on the backend's own top score, before the
+     number tie-break reorders anything. */
+  var confident = typeof results[0].score === "number" && results[0].score >= VISUAL_CONFIDENT_SCORE;
+  var ordered = results.slice();
+  /* Tie-break: the printed-number read agrees with a lower-ranked
+     visual candidate — visual + number beats visual alone. */
+  if (number){
+    for (var i = 1; i < ordered.length; i++){
+      if (ordered[i] && numberMatches(ordered[i].number, number)){
+        ordered.unshift(ordered.splice(i, 1)[0]);
+        break;
+      }
+    }
+  }
+  setScanStatus('<span class="spinner"></span>Your PC matched <b>' + esc(ordered[0].name || "a card") + '</b> — fetching its prices…');
+  fetchVisualDetails(ordered).then(function(cards){
+    /* The winning card itself must have fetchable detail; without it
+       there is nothing to present, so the OCR pipeline takes over. */
+    if (!cards.length || cards[0].id !== ordered[0].id){
+      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, false);
+      return;
+    }
+    if (confident){
+      scanning = false;
+      presentVisualMatch(cards, scanThumb, false);
+    } else if (state.mode === "batch"){
+      scanning = false;
+      presentVisualMatch(cards, scanThumb, true);
+    } else {
+      weakVisualPicker(cards, src, number, setSize, scanThumb);
+    }
+  });
+}
+/* The pre-backend OCR pipeline, unchanged: name band first (with the
+   number-first shortcut when the strips produced a clean number + set
+   size), whole-image read as the fallback. Reached when the visual
+   backend can't settle the card, with the strip reads already in hand. */
+function runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, backendMissed){
   if (typeof Tesseract === "undefined"){
     handleOcrFailure(sourceLabel, "The card reader couldn't load. Check your connection — or search the name manually below.");
     return;
   }
-  var src = downscaleForOcr(source);
-  /* Isolate the card before any OCR crop: when the yellow border is
-     found, the name band and number strips below are cut from the card
-     alone instead of the whole photo, so the band/strip fractions land
-     where they were calibrated to land. No suitable yellow region means
-     the full image flows through exactly as before. */
-  var isolated = null;
-  try { isolated = autoCropToCard(src); } catch (e) { isolated = null; }
-  if (isolated){
-    src = isolated;
-    setScanStatus('<span class="spinner"></span>Card found — reading the card name…');
+  if (backendMissed){
+    setScanStatus('<span class="spinner"></span>PC backend unreachable — reading on-device instead…');
   }
-  var scanThumb = scanThumbFromSource(src);
-  /* The embedded index is ready before any scan can begin. */
-  var nameIndexForScan = cardNameIndex;
-  // Read the independent name band and collector-number strips in parallel.
   // The name band crops to the center 60% horizontally: the full-width band
   // also catches the "STAGE 1" box on the left and "HP 90" on the right,
   // which OCR mangles into the name read. Vertically the band starts at
   // y 5% instead of the top edge: phone photos often include background
   // (table, playmat) above the card, and OCRing that fabric returns
   // garbage. The printed name sits around y 8-12%, safely inside the
-  // 5-16% band even when the card fills the frame edge-to-edge. The number strips read BOTH
-  // bottom corners: the left crop is a tight box (x 12-38%, y 86-93%)
-  // around where most sets print the number, below the illustrator
-  // credit — the weakness bar above and the copyright/flavor text around
-  // it stay out of the read — while the right crop keeps the wider
-  // x 55-100%, y 84-97% box for sets with right-side numbering. Both
-  // strips upscale 3x so the small printed digits give Tesseract more
-  // pixels to work with.
+  // 5-16% band even when the card fills the frame edge-to-edge.
   var band = null;
-  var stripL = null;
-  var stripR = null;
   try { band = ocrPrepBand(src, 0.05, 0.11, 0.20, 0.60); } catch (e) { band = null; }
-  try { stripL = ocrPrepBand(src, 0.86, 0.07, 0.12, 0.26, 3); } catch (e) { stripL = null; }
-  try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45, 3); } catch (e) { stripR = null; }
   var bandRun = band ? ocrRecognize(band, 3) : Promise.reject(new Error("band prep failed"));
-  var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
-  var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
-  Promise.all([bandRun, numRunL, numRunR]).then(function(reads){
-    var bandText = (reads[0] && reads[0].data && reads[0].data.text) || "";
+  bandRun.then(function(res){
+    var bandText = (res && res.data && res.data.text) || "";
     var candidates = bandNameCandidates(bandText);
-    var numTextL = (reads[1] && reads[1].data && reads[1].data.text) || "";
-    var numTextR = (reads[2] && reads[2].data && reads[2].data.text) || "";
-    /* Pick the corner read to trust: a clean "123/214" slash pair beats a
-       bare number, and when both corners produce a pair the left wins —
-       that's where most sets print it. */
-    var parsedL = parsePrintedNumber(numTextL);
-    var parsedR = parsePrintedNumber(numTextR);
-    var parsed = (parsedL && parsedL.setSize) ? parsedL
-      : (parsedR && parsedR.setSize) ? parsedR
-      : (parsedL || parsedR);
-    var number = parsed ? parsed.number : null;
-    var setSize = parsed ? parsed.setSize : null;
     function nameFlow(){
       if (!candidates.length){ wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb); return; }
       tryBandQueries(candidates, number, setSize, sourceLabel, nameIndexForScan, scanThumb);
@@ -1825,6 +1956,68 @@ function identifyCanvas(source, sourceLabel){
     }
   }).catch(function(){
     wholeImageIdentify(src, sourceLabel, nameIndexForScan, scanThumb);
+  });
+}
+
+function identifyCanvas(source, sourceLabel){
+  if (scanning) return;
+  scanning = true;
+  setScanStatus('<span class="spinner"></span>Identifying the card…');
+  var src = downscaleForOcr(source);
+  /* Isolate the card before any OCR crop: when the yellow border is
+     found, the name band and number strips below are cut from the card
+     alone instead of the whole photo, so the band/strip fractions land
+     where they were calibrated to land. No suitable yellow region means
+     the full image flows through exactly as before. */
+  var isolated = null;
+  try { isolated = autoCropToCard(src); } catch (e) { isolated = null; }
+  if (isolated){
+    src = isolated;
+    setScanStatus('<span class="spinner"></span>Card found — identifying it…');
+  }
+  var scanThumb = scanThumbFromSource(src);
+  /* The embedded index is ready before any scan can begin. */
+  var nameIndexForScan = cardNameIndex;
+  // The number strips read BOTH bottom corners: the left crop is a tight
+  // box (x 12-38%, y 86-93%) around where most sets print the number,
+  // below the illustrator credit — the weakness bar above and the
+  // copyright/flavor text around it stay out of the read — while the
+  // right crop keeps the wider x 55-100%, y 84-97% box for sets with
+  // right-side numbering. Both strips upscale 3x so the small printed
+  // digits give Tesseract more pixels to work with. The strips run in
+  // parallel with the visual backend call: the number read is the
+  // tie-breaker between visual candidates, and the fallback's input
+  // when the backend can't settle the card.
+  var stripL = null;
+  var stripR = null;
+  try { stripL = ocrPrepBand(src, 0.86, 0.07, 0.12, 0.26, 3); } catch (e) { stripL = null; }
+  try { stripR = ocrPrepBand(src, 0.84, 0.13, 0.55, 0.45, 3); } catch (e) { stripR = null; }
+  var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
+  var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
+  var visualRun = visualIdentify(src);
+  Promise.all([numRunL, numRunR, visualRun]).then(function(reads){
+    var numTextL = (reads[0] && reads[0].data && reads[0].data.text) || "";
+    var numTextR = (reads[1] && reads[1].data && reads[1].data.text) || "";
+    /* Pick the corner read to trust: a clean "123/214" slash pair beats a
+       bare number, and when both corners produce a pair the left wins —
+       that's where most sets print it. */
+    var parsedL = parsePrintedNumber(numTextL);
+    var parsedR = parsePrintedNumber(numTextR);
+    var parsed = (parsedL && parsedL.setSize) ? parsedL
+      : (parsedR && parsedR.setSize) ? parsedR
+      : (parsedL || parsedR);
+    var number = parsed ? parsed.number : null;
+    var setSize = parsed ? parsed.setSize : null;
+    var visual = reads[2];
+    if (visual && visual.length){
+      presentVisualResults(visual, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize);
+    } else {
+      /* Backend failure, timeout, or no matches: the on-device pipeline
+         takes over, and the status says so. */
+      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, !!backendBase());
+    }
+  }).catch(function(){
+    runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, false);
   });
 }
 
@@ -2129,6 +2322,32 @@ bindSetting("setShip","ship"); bindSetting("setTax","taxRate"); bindSetting("set
 bindSetting("setLP","lpPct"); bindSetting("setMP","mpPct"); bindSetting("setHP","hpPct");
 $("setApiKey").value = state.settings.apiKey || "";
 $("setApiKey").addEventListener("change", function(){ state.settings.apiKey = this.value.trim(); persist(); toast("API key " + (this.value.trim() ? "saved" : "cleared")); });
+$("setBackendUrl").value = state.settings.backendUrl || "";
+$("setBackendUrl").addEventListener("change", function(){
+  state.settings.backendUrl = this.value.trim().replace(/\/+$/, "");
+  this.value = state.settings.backendUrl;
+  persist();
+  toast(state.settings.backendUrl ? "Backend URL saved" : "Backend off — on-device scanning only");
+});
+$("testBackendBtn").addEventListener("click", function(){
+  var base = backendBase();
+  var st = $("backendStatus");
+  if (!base){ st.textContent = "No URL set — scans run on-device only."; return; }
+  st.textContent = "Testing…";
+  var controller = new AbortController();
+  var timer = setTimeout(function(){ controller.abort(); }, VISUAL_TIMEOUT_MS);
+  fetch(base + "/health", { signal: controller.signal }).then(function(r){
+    clearTimeout(timer);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function(j){
+    st.textContent = "Online — " + (j.device || "unknown device") +
+      (j.catalog_size != null ? ", " + Number(j.catalog_size).toLocaleString() + " cards in the catalog." : ".");
+  }).catch(function(){
+    clearTimeout(timer);
+    st.textContent = "Offline — couldn't reach the PC backend. Check the PC is on, the server is running, and Tailscale is connected.";
+  });
+});
 
 /* ================= init ================= */
 renderBinders();
