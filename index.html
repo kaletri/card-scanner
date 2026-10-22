@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-21h</p>
+      <p class="build-version">build 2026-10-21i</p>
     </section>
   </main>
 
@@ -1718,14 +1718,34 @@ function noCatalogMatch(candidates){
    — "no correction needed" — which the fuzzy pass reads as failure. So a
    correct name read can still dead-end on a card that is plainly in the
    catalog. This pass searches by the name alone — the fuzzy-corrected
-   name when there is one, otherwise the raw read — with no number in the
-   query and no number filter on the results. Hits go to the candidate
-   picker; only an empty name-only search earns the no-match message. */
+   name when there is one, a unique name fragment's card when the read
+   is only a fragment of the name, otherwise the raw read — with no
+   number in the query and no number filter on the results. Hits go to
+   the candidate picker; only an empty name-only search earns the
+   no-match message. */
 function nameOnlyFallback(candidates, nameIndexForScan, scanThumb){
   var rawRead = candidates && candidates[0];
   if (!rawRead){ noCatalogMatch(candidates); return; }
-  var correction = closestCatalogName(rawRead, nameIndexForScan);
-  var safe = String(correction ? correction.name : rawRead).replace(/"/g, "").trim();
+  /* Clean the read before matching — stage/label words and stray
+     digits riding along in the band ("Basic Coba 4 Cn 0") are not
+     part of any name — then, in order: the full-string fuzzy
+     correction on the cleaned read; a fragment match, where a unique
+     name fragment identifies its card even when the full read is too
+     partial to correct; and finally the read exactly as it arrived,
+     which is what this fallback searched before cleaning existed. */
+  var cleaned = cleanNameRead(rawRead);
+  var correction = cleaned ? closestCatalogName(cleaned, nameIndexForScan) : null;
+  var safe = "";
+  if (correction) safe = correction.name;
+  if (!safe && cleaned){
+    var fragGroup = fragmentGroupFromReads([cleaned], catalogNameGroups());
+    if (fragGroup) safe = fragGroup.name;
+  }
+  if (!safe){
+    var rawCorrection = closestCatalogName(rawRead, nameIndexForScan);
+    safe = rawCorrection ? rawCorrection.name : rawRead;
+  }
+  safe = String(safe).replace(/"/g, "").trim();
   if (!safe){ noCatalogMatch(candidates); return; }
   setScanStatus('<span class="spinner"></span>No match yet — searching the catalog for <b>' + esc(safe) + '</b> by name alone…');
   apiFetchWithRetries('name:"' + safe + '*"', 24).then(function(cards){
@@ -2000,10 +2020,13 @@ function surfaceManualSearch(){
   try { input.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" }); } catch (e) {}
   try { input.focus({ preventScroll: true }); } catch (e) { try { input.focus(); } catch (e2) {} }
 }
-/* Set while a scan is being answered by the on-device fallback because
-   the PC backend couldn't be reached. The OCR flow's terminal status
-   setters prepend it, so the finished result always says plainly
-   which pipeline produced it. Reset at the start of every scan. */
+/* Set while a scan is being answered by the on-device fallback after
+   the visual backend was consulted for that scan — unreachable,
+   timed out, empty, errored, or its answer unusable. Every path that
+   hands a scan to the OCR flow passes that fact in (see runOcrFlow's
+   call sites), so the terminal status always says plainly which
+   pipeline produced the result. The OCR flow's terminal status
+   setters prepend it. Reset at the start of every scan. */
 var scanPipelineNote = "";
 function notedStatus(html, isErr){
   setScanStatus(scanPipelineNote ? scanPipelineNote + " " + html : html, isErr);
@@ -2357,6 +2380,88 @@ function strongestNameGroup(groups){
   }
   return best;
 }
+/* ---- fragment-aware name matching ----
+   A name-band read often arrives with the card's furniture stuck to
+   it — the stage box ("BASIC"), the HP corner, stray digits from the
+   number strip: "Basic Coba 4 Cn 0" for a card named Cobalion. Before
+   any matching, the read is cleaned: label words, pure-digit tokens,
+   and symbol remnants are dropped, leaving the name-shaped tokens.
+   Matching then runs (a) the existing full-string fuzzy match on the
+   cleaned read, and (b) — only when that fails — a fragment match:
+   the longest cleaned token, or the cleaned read itself, of at least
+   4 characters, looked up as a prefix/substring of catalog names.
+   A fragment fires only when it points at exactly ONE name: suffixed
+   printings of one base name (Cobalion / Cobalion EX / Cobalion GX)
+   share their head word and count as that one name, while a fragment
+   spanning several head words ("Char" — Charmander, Charmeleon,
+   Charizard, …) fires for none of them. A fragment hit is promoted
+   and presented exactly like a full-string match. */
+var NAME_READ_NOISE = { basic: 1, stage: 1, hp: 1 };
+function cleanNameReadTokens(read){
+  var norm = normalizeMatchName(read);
+  if (!norm) return [];
+  return norm.split(" ").filter(function(t){
+    if (!t || NAME_READ_NOISE[t]) return false;
+    if (/^\d+$/.test(t)) return false;
+    return /[a-zà-ÿ]/.test(t);
+  });
+}
+function cleanNameRead(read){
+  return cleanNameReadTokens(read).join(" ");
+}
+/* Fragment candidates from cleaned reads, in the order the reads were
+   ranked: each read's longest token, then the read as a whole. Only
+   fragments of 4+ characters can identify a name. */
+function nameReadFragments(reads){
+  var out = [], seen = {};
+  function push(f){ if (f && f.length >= 4 && !seen[f]){ seen[f] = 1; out.push(f); } }
+  (reads || []).forEach(function(r){
+    var toks = cleanNameReadTokens(r), longest = "";
+    toks.forEach(function(t){ if (t.length > longest.length) longest = t; });
+    push(longest);
+    push(toks.join(" "));
+  });
+  return out;
+}
+/* Resolve one fragment against name groups ([{ name, key, … }]). A
+   single-token fragment identifies a name by its head word — the
+   first word of the normalized name, where a card's identity lives:
+   "coba" sits in the head word of Cobalion, Cobalion EX and Cobalion
+   GX alike (one name), while its appearance later in a name
+   ("Blaine's Charmander") is a different card's, not evidence. A
+   multi-word fragment (a whole cleaned read) is matched against full
+   names instead, since word order is what it carries. Either way the
+   fragment fires only when every group it touches shares one head
+   word — and then returns the bare base-name group when one exists
+   (the plain printing's name), else the single touched group. Null
+   when the fragment touches nothing, or spans more than one name. */
+function uniqueFragmentGroup(frag, groups){
+  var wholeName = frag.indexOf(" ") >= 0;
+  var matched = [];
+  groups.forEach(function(g){
+    if (!g.key) return;
+    var hay = wholeName ? g.key : g.key.split(" ")[0];
+    if (hay.indexOf(frag) >= 0) matched.push(g);
+  });
+  if (!matched.length) return null;
+  var head = matched[0].key.split(" ")[0], bare = null;
+  for (var i = 0; i < matched.length; i++){
+    if (matched[i].key.split(" ")[0] !== head) return null;
+    if (matched[i].key === head) bare = matched[i];
+  }
+  if (bare) return bare;
+  return matched.length === 1 ? matched[0] : null;
+}
+/* The first fragment from the reads that resolves to exactly one
+   name group, or null. */
+function fragmentGroupFromReads(reads, groups){
+  var frags = nameReadFragments(reads);
+  for (var i = 0; i < frags.length; i++){
+    var g = uniqueFragmentGroup(frags[i], groups);
+    if (g) return g;
+  }
+  return null;
+}
 /* The one visual candidate the name read points at, or null. Candidates
    are grouped by normalized name first — several printings of the same
    card in the top-K are one answer to a name read, and the group's
@@ -2372,7 +2477,12 @@ function bestVisualNameMatch(reads, results){
     keys.push(key);
   });
   var winner = strongestNameGroup(keys.map(function(k){ return groups[k]; }));
-  return winner ? winner.rep : null;
+  if (winner) return winner.rep;
+  /* Full-string fuzzy found nothing: a unique fragment of the read
+     inside exactly one candidate's name promotes that candidate the
+     same way (see the fragment-matching block above). */
+  var frag = fragmentGroupFromReads(reads, keys.map(function(k){ return { key: k, rep: groups[k].rep }; }));
+  return frag ? frag.rep : null;
 }
 /* ---- catalog-wide name match ----
    The same read scored against every distinct name in the embedded
@@ -2408,7 +2518,12 @@ function bestCatalogNameMatch(reads){
   var scored = catalogNameGroups().map(function(g){
     return { name: g.name, key: g.key, ids: g.ids, score: nameReadScoreVariants(reads, [g.key], 5) };
   });
-  return strongestNameGroup(scored);
+  var winner = strongestNameGroup(scored);
+  if (winner) return winner;
+  /* Full-string fuzzy found nothing: a unique fragment of the read
+     inside exactly one catalog name still identifies the card (see
+     the fragment-matching block above). */
+  return fragmentGroupFromReads(reads, catalogNameGroups());
 }
 /* Which printing of a catalog-matched name to present: the one whose
    collector number — the id's suffix after the last dash — equals the
@@ -2456,7 +2571,15 @@ function quickNameBandText(src){
 function nameCheckPromote(src, ordered, numberWinnerId, number){
   return quickNameBandText(src).then(function(text){
     if (!text) return false;
-    var reads = bandNameCandidates(text);
+    /* Clean the reads before matching: stage/label words and stray
+       digits riding along in the band are not part of any name, and
+       the fragment fallback needs the name-shaped tokens (see the
+       fragment-matching block above). */
+    var reads = [], seenReads = {};
+    bandNameCandidates(text).forEach(function(r){
+      var c = cleanNameRead(r);
+      if (c && !seenReads[c]){ seenReads[c] = 1; reads.push(c); }
+    });
     if (!reads.length) return false;
     var winner = bestVisualNameMatch(reads, ordered);
     if (winner){
@@ -2531,9 +2654,12 @@ function presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, sc
   var pref = prefetchVisualDetails(ordered);
   pref.winner.then(function(winnerCard){
     /* The winning card itself must have fetchable detail; without it
-       there is nothing to present, so the OCR pipeline takes over. */
+       there is nothing to present, so the OCR pipeline takes over.
+       The backend was consulted for this scan and its answer proved
+       unusable, so the on-device result carries the provenance note
+       like every other backend-consulted fallback. */
     if (!winnerCard){
-      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, false);
+      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, true);
       return;
     }
     var cards = pref.cards;
@@ -2661,7 +2787,10 @@ function identifyCanvas(source, sourceLabel){
       runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, !!backendBase());
     }
   }).catch(function(){
-    runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, false);
+    /* The identification chain itself failed somewhere along the way;
+       the visual backend was part of it whenever one is configured,
+       so the on-device fallback labels its provenance the same way. */
+    runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, !!backendBase());
   });
 }
 
