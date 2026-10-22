@@ -62,6 +62,9 @@
   /* viewfinder */
   .finder{margin-top:14px;border-radius:18px;overflow:hidden;background:#0b0c0d;position:relative;aspect-ratio:4/4.6;max-height:430px;width:100%}
   .finder video{width:100%;height:100%;object-fit:cover;display:block}
+  .finder img.frozen{width:100%;height:100%;object-fit:cover;display:block}
+  .standby-tag{position:absolute;top:10px;left:10px;background:rgba(10,10,10,.72);color:#fff;font-size:12px;font-weight:600;padding:6px 11px;border-radius:99px;align-items:center}
+  .standby-tag .spinner{border-color:rgba(255,255,255,.35);border-top-color:#fff}
   .finder .frame{position:absolute;inset:9% 11%;border:2px solid rgba(255,255,255,.85);border-radius:14px;box-shadow:0 0 0 999px rgba(5,6,7,.42);pointer-events:none}
   .finder .frame::after{content:"FIT CARD INSIDE FRAME";position:absolute;left:0;right:0;bottom:-26px;text-align:center;font-size:10px;letter-spacing:.14em;color:rgba(255,255,255,.75);font-weight:600}
   .finder .hint{position:absolute;inset:0;display:grid;place-items:center;color:#c9cdd2;text-align:center;padding:24px;font-size:13.5px}
@@ -92,6 +95,10 @@
   .img-fallback{width:100%;aspect-ratio:63/88;display:grid;place-items:center;background:var(--panel2);border-radius:7px;color:var(--ink2);font-family:var(--font-d);font-weight:800;font-size:19px;text-align:center;padding:6px}
   .status-line{font-size:13px;color:var(--ink2);margin-top:10px;min-height:18px}
   .status-line.err{color:var(--warn)}
+  .backend-pill{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12.5px;color:var(--ink2)}
+  .backend-pill .bp-dot{width:9px;height:9px;border-radius:50%;background:var(--ink2);flex:0 0 9px}
+  .backend-pill .bp-dot.on{background:var(--good)}
+  .backend-pill .bp-dot.off{background:var(--warn)}
   .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;vertical-align:-2px;animation:sp 0.8s linear infinite;margin-right:7px}
   @keyframes sp{to{transform:rotate(360deg)}}
 
@@ -255,6 +262,8 @@
         <button id="modeBatch">Batch mode</button>
       </div>
 
+      <div class="backend-pill" id="backendPill"><span class="bp-dot" id="backendDot"></span><span id="backendPillText">PC backend: Checking…</span></div>
+
       <div id="batchBar" style="display:none;margin-top:12px">
         <div class="card-panel" style="padding:11px 13px">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
@@ -275,6 +284,8 @@
 
       <div class="finder" id="finder">
         <video id="camVideo" playsinline muted style="display:none"></video>
+        <img id="camFrozen" class="frozen" alt="" style="display:none" />
+        <div class="standby-tag" id="standbyTag" style="display:none"><span class="spinner"></span>Searching…</div>
         <div class="hint" id="finderHint">
           <div>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
@@ -382,7 +393,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-21a</p>
+      <p class="build-version">build 2026-10-21d</p>
     </section>
   </main>
 
@@ -697,6 +708,7 @@ function showView(name){
   });
   if (name==="list") renderList();
   if (name==="archive") renderArchive();
+  if (name==="scan") checkBackendPill();
   window.scrollTo(0,0);
 }
 document.querySelectorAll("nav button").forEach(function(b){
@@ -755,12 +767,27 @@ function openDetail(card, opts){
     language: "English",
     snapshotAt: Date.now(),
     queueId: opts.queueId || null,
-    scanThumb: opts.scanThumb || null
+    scanThumb: opts.scanThumb || null,
+    pref: opts.pref || null
   };
   renderDetail();
   $("detailVeil").classList.add("on");
+  /* Alternates still streaming in from the parallel prefetch refresh
+     the sheet in place, so the "Not this card?" list is complete — and
+     priced from the session cache — whenever it's opened. Printing,
+     pattern, and language selections live on `detail`, so a refresh
+     never disturbs them. */
+  if (detail.pref){
+    var mine = detail;
+    detail.pref.onFill(function(){
+      if (detail !== mine) return;
+      var altsOpen = $("dAlts").style.display !== "none";
+      renderDetail();
+      if (altsOpen) $("dAlts").style.display = "grid";
+    });
+  }
 }
-function closeDetail(){ $("detailVeil").classList.remove("on"); detail = null; }
+function closeDetail(){ $("detailVeil").classList.remove("on"); detail = null; wakeCamera(); }
 $("dClose").addEventListener("click", closeDetail);
 $("detailVeil").addEventListener("click", function(e){ if (e.target===this) closeDetail(); });
 
@@ -879,12 +906,10 @@ $("dNotCard").addEventListener("click", function(){
    them tap the card they actually scanned. Tapping a row opens that card's
    detail sheet with the full candidate list still attached, so "Not this
    card?" keeps working from there too. */
-var pickCtx = null; // {cards, scanThumb}
-function openCandidatePicker(cards, readName, scanThumb, noteText){
-  pickCtx = { cards: cards, scanThumb: scanThumb || null };
-  $("pickNote").innerHTML = noteText ? esc(noteText) :
-    "Read <b>" + esc(readName) + "</b>, but a few cards sit one digit apart and the name doesn't settle it. Tap the one you scanned.";
-  $("pickScannedPhoto").innerHTML = scannedPhotoHtml(scanThumb, false);
+var pickCtx = null; // {cards, scanThumb, pref}
+function renderPickList(){
+  if (!pickCtx) return;
+  var cards = pickCtx.cards;
   $("pickList").innerHTML = cards.map(function(c, i){
     var price = null, keys = printingKeys(c);
     for (var k = 0; k < keys.length; k++){
@@ -899,14 +924,28 @@ function openCandidatePicker(cards, readName, scanThumb, noteText){
   $("pickList").querySelectorAll("[data-pick]").forEach(function(b){
     b.addEventListener("click", function(){
       var chosen = pickCtx.cards[Number(b.getAttribute("data-pick"))];
-      var all = pickCtx.cards, thumb = pickCtx.scanThumb;
+      var all = pickCtx.cards, thumb = pickCtx.scanThumb, pref = pickCtx.pref;
       closeCandidatePicker();
-      openDetail(chosen, { candidates: all, scanThumb: thumb });
+      openDetail(chosen, { candidates: all, scanThumb: thumb, pref: pref });
     });
   });
-  $("pickVeil").classList.add("on");
 }
-function closeCandidatePicker(){ $("pickVeil").classList.remove("on"); pickCtx = null; }
+function openCandidatePicker(cards, readName, scanThumb, noteText, pref){
+  pickCtx = { cards: cards, scanThumb: scanThumb || null, pref: pref || null };
+  $("pickNote").innerHTML = noteText ? esc(noteText) :
+    "Read <b>" + esc(readName) + "</b>, but a few cards sit one digit apart and the name doesn't settle it. Tap the one you scanned.";
+  $("pickScannedPhoto").innerHTML = scannedPhotoHtml(scanThumb, false);
+  renderPickList();
+  $("pickVeil").classList.add("on");
+  /* Candidates still streaming in from the parallel prefetch appear in
+     the list — with their prices — as they land, instead of the whole
+     list waiting on the slowest fetch. */
+  if (pickCtx.pref){
+    var myCtx = pickCtx;
+    pickCtx.pref.onFill(function(){ if (pickCtx === myCtx) renderPickList(); });
+  }
+}
+function closeCandidatePicker(){ $("pickVeil").classList.remove("on"); pickCtx = null; wakeCamera(); }
 $("pickClose").addEventListener("click", closeCandidatePicker);
 $("pickVeil").addEventListener("click", function(e){ if (e.target===this) closeCandidatePicker(); });
 $("pickNone").addEventListener("click", function(){ closeCandidatePicker(); surfaceManualSearch(); });
@@ -1014,6 +1053,9 @@ $("searchInput").addEventListener("keydown", function(e){ if (e.key==="Enter") d
 
 /* ================= camera + OCR ================= */
 var stream = null, scanning = false, streamReadyAt = 0;
+/* True while a live-scan identification is in flight and the camera is
+   powered down in standby (see enterCameraStandby / wakeCamera). */
+var cameraStandby = false;
 
 /* The complete catalog-name index is embedded so the single-file deployment
    always has fuzzy correction available synchronously, with no asset fetch or
@@ -1115,11 +1157,61 @@ function startCamera(){
 }
 function stopCamera(){
   if (stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  /* An explicit stop also cancels any standby: the camera stays off
+     even when the in-flight search finishes. */
+  cameraStandby = false;
+  clearStandbyUi();
   $("camVideo").style.display = "none";
   $("finderHint").style.display = "grid";
   $("finderFrame").style.display = "none";
   $("stopCamBtn").style.display = "none";
   $("scanBtnLabel").textContent = "Start camera & scan";
+}
+/* ---- camera standby during identification ----
+   The moment a live frame is captured and the search begins, the
+   stream is powered down — the camera does no work while the backend
+   POST, OCR reads, and price fetches run — and the captured frame
+   stays on screen in place of the live preview. wakeCamera() restarts
+   the stream through the normal startCamera() path (focus settle
+   window included) when the flow returns to the live scan view: in
+   batch mode that's the moment a result is presented, in single mode
+   it's when the result sheet / picker closes, and on a no-match or
+   failed read it's immediate. Capture geometry, the guide frame, and
+   identification logic are untouched. */
+function clearStandbyUi(){
+  var img = $("camFrozen");
+  img.style.display = "none";
+  img.removeAttribute("src");
+  $("standbyTag").style.display = "none";
+}
+function enterCameraStandby(frameCanvas){
+  if (!stream || cameraStandby) return;
+  var url = null;
+  try { url = frameCanvas ? frameCanvas.toDataURL("image/jpeg", 0.85) : null; } catch (e) { url = null; }
+  stream.getTracks().forEach(function(t){ t.stop(); });
+  stream = null;
+  cameraStandby = true;
+  $("camVideo").style.display = "none";
+  if (url){
+    var img = $("camFrozen");
+    img.src = url;
+    img.style.display = "block";
+  }
+  $("standbyTag").style.display = "flex";
+}
+function wakeCamera(){
+  if (!cameraStandby) return;
+  /* Deferred a tick: a picker-row tap closes the picker and opens the
+     detail sheet in the same handler — the camera shouldn't wake
+     behind that sheet. If a sheet is (still) up, its own close calls
+     wakeCamera() again. */
+  setTimeout(function(){
+    if (!cameraStandby) return;
+    if ($("detailVeil").classList.contains("on") || $("pickVeil").classList.contains("on") || $("qtyVeil").classList.contains("on")) return;
+    cameraStandby = false;
+    clearStandbyUi();
+    startCamera().catch(function(){});
+  }, 0);
 }
 $("stopCamBtn").addEventListener("click", stopCamera);
 
@@ -1744,9 +1836,18 @@ function surfaceManualSearch(){
   try { input.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" }); } catch (e) {}
   try { input.focus({ preventScroll: true }); } catch (e) { try { input.focus(); } catch (e2) {} }
 }
+/* Set while a scan is being answered by the on-device fallback because
+   the PC backend couldn't be reached. The OCR flow's terminal status
+   setters prepend it, so the finished result always says plainly
+   which pipeline produced it. Reset at the start of every scan. */
+var scanPipelineNote = "";
+function notedStatus(html, isErr){
+  setScanStatus(scanPipelineNote ? scanPipelineNote + " " + html : html, isErr);
+}
 function handleOcrFailure(sourceLabel, msg){
   scanning = false;
-  setScanStatus(msg || OCR_FAIL_MSG, true);
+  notedStatus(msg || OCR_FAIL_MSG, true);
+  wakeCamera();
   if (state.mode === "batch"){
     state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: "Couldn't read it — tap to search manually" });
     renderQueue();
@@ -1770,6 +1871,49 @@ var VISUAL_CONFIDENT_SCORE = 0.5;
 function backendBase(){
   return (state.settings.backendUrl || "").trim().replace(/\/+$/, "");
 }
+/* Persistent Scan-tab indicator: which identification pipeline a scan
+   will use. Re-checked whenever the Scan view is shown and whenever
+   the app regains focus, so a PC that went to sleep (or a Tailscale
+   toggle) is reflected without a reload. */
+var backendPillInFlight = false;
+function checkBackendPill(){
+  var dot = $("backendDot"), txt = $("backendPillText");
+  if (!dot || !txt) return;
+  var base = backendBase();
+  if (!base){
+    dot.className = "bp-dot";
+    txt.textContent = "PC backend: Not set";
+    return;
+  }
+  if (backendPillInFlight) return;
+  backendPillInFlight = true;
+  txt.textContent = "PC backend: Checking…";
+  var controller = new AbortController();
+  var timer = setTimeout(function(){ controller.abort(); }, 3000);
+  fetch(base + "/health", { signal: controller.signal }).then(function(r){
+    clearTimeout(timer);
+    backendPillInFlight = false;
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function(j){
+    if (j && j.status === "ok"){
+      dot.className = "bp-dot on";
+      txt.textContent = "PC backend: Online";
+    } else {
+      dot.className = "bp-dot off";
+      txt.textContent = "PC backend: Offline";
+    }
+  }).catch(function(){
+    clearTimeout(timer);
+    backendPillInFlight = false;
+    dot.className = "bp-dot off";
+    txt.textContent = "PC backend: Offline";
+  });
+}
+window.addEventListener("focus", checkBackendPill);
+document.addEventListener("visibilitychange", function(){
+  if (!document.hidden) checkBackendPill();
+});
 /* Resolves to the backend's results array, or null on any failure:
    no URL configured, timeout, HTTP error, or an empty result list. */
 function visualIdentify(canvas){
@@ -1808,19 +1952,61 @@ function fetchCardById(id){
     return (cards && cards.length) ? cards[0] : null;
   }).catch(function(){ return null; });
 }
-function fetchVisualDetails(orderedResults){
-  return Promise.all(orderedResults.map(function(r){ return fetchCardById(r.id); })).then(function(details){
-    var out = [];
-    orderedResults.forEach(function(r, i){ if (details[i]) out.push(details[i]); });
-    return out;
+/* ---- parallel prefetch + per-session detail cache ----
+   Detail fetches are the slow tail of a visual ID: each one is an
+   independent catalog query with its own retry backoff, so waiting for
+   every candidate before showing anything lets one straggler's retries
+   dominate the wait after an otherwise fast visual match. Instead, the
+   moment visual results land, every candidate's fetch starts at once
+   and each settles on its own; fetched details are cached by card id
+   for the rest of the session, so presenting a candidate again (a
+   picker tap, a "Not this card?" switch, a queue confirm) never
+   refetches it. Presentation gates only on the winner's own fetch —
+   the alternates stream into the shared live list as they land, and
+   any UI showing that list refreshes through onFill. A candidate whose
+   fetch fails simply never enters the list, exactly as before. */
+var detailCache = {}; // card id -> Promise<card|null>
+function fetchCardDetail(id){
+  var key = String(id);
+  if (!detailCache[key]) detailCache[key] = fetchCardById(key);
+  return detailCache[key];
+}
+function prefetchVisualDetails(orderedResults){
+  var seen = {}, results = [];
+  orderedResults.forEach(function(r){
+    if (r && r.id && !seen[r.id]){ seen[r.id] = 1; results.push(r); }
   });
+  var slots = results.map(function(){ return null; });
+  var live = [];
+  var listeners = [];
+  function rebuild(){
+    live.length = 0;
+    slots.forEach(function(c){ if (c) live.push(c); });
+    listeners.slice().forEach(function(fn){ fn(); });
+  }
+  var promises = results.map(function(r, i){
+    return fetchCardDetail(r.id).then(function(card){
+      if (card){ slots[i] = card; rebuild(); }
+      return card;
+    });
+  });
+  return {
+    cards: live, // live candidate list: visual order, failures dropped
+    winner: promises.length ? promises[0] : Promise.resolve(null),
+    onFill: function(fn){ listeners.push(fn); }
+  };
 }
 /* Present a visual match the way handleMatch presents an OCR match:
    single mode opens the detail sheet (or the picker when weak); batch
    mode rapid-logs a confident hit or queues it for a confirm tap. */
-function presentVisualMatch(cards, scanThumb, weak){
+function presentVisualMatch(cards, scanThumb, weak, pref, topScore){
   var best = cards[0];
-  if (!weak) setScanStatus("Identified by your PC — <b>" + esc(best.name) + "</b>. Confirm it's the right card.");
+  var scoreTxt = (typeof topScore === "number" && isFinite(topScore)) ? topScore.toFixed(2) : null;
+  if (!weak){
+    setScanStatus("Identified by PC visual backend" + (scoreTxt ? " · top score " + scoreTxt : "") + " — <b>" + esc(best.name) + "</b>. Confirm it's the right card.");
+  } else if (state.mode === "batch"){
+    setScanStatus("PC visual backend" + (scoreTxt ? " · best score " + scoreTxt : "") + " — weak match, queued for confirmation.");
+  }
   if (state.mode === "batch"){
     if (state.rapidLog && !weak){
       var keys = printingKeys(best);
@@ -1832,32 +2018,43 @@ function presentVisualMatch(cards, scanThumb, weak){
         addRow(best, { printing: pk, language: "English", condition: condName, price: price, worthItEach: worthIt(price), qty: 1 });
         toast("Auto-added " + best.name + " (" + cond.ab + ")");
       } else {
-        pushQueue(best, cards, true, "No market price — needs a look", scanThumb);
+        pushQueue(best, cards, true, "No market price — needs a look", scanThumb, pref);
       }
     } else {
-      pushQueue(best, cards, weak, weak ? "Weak visual match — confirm" : "", scanThumb);
+      pushQueue(best, cards, weak, weak ? "Weak visual match — confirm" : "", scanThumb, pref);
       toast("Queued: " + best.name);
     }
     renderQueue();
+    /* Batch flow is back at the live view for the next card. */
+    wakeCamera();
   } else if (weak){
-    setScanStatus("Your PC's visual match wasn't confident — pick the right card.");
+    setScanStatus("PC visual backend" + (scoreTxt ? " · best score " + scoreTxt : "") + " — pick the card");
     openCandidatePicker(cards, best.name, scanThumb,
-      "Your PC found look-alike cards but none scored as a confident visual match. Tap the card you scanned.");
+      "Your PC found look-alike cards but none scored as a confident visual match. Tap the card you scanned.", pref);
   } else {
-    openDetail(best, { candidates: cards, scanThumb: scanThumb });
+    openDetail(best, { candidates: cards, scanThumb: scanThumb, pref: pref });
   }
 }
 /* Weak visual result, single mode: the picker shows the visual top-K,
    with any catalog hits from the on-device name-band read merged in
    behind them (deduplicated, visual order first). */
-function weakVisualPicker(visualCards, src, number, setSize, scanThumb){
+function weakVisualPicker(visualCards, src, number, setSize, scanThumb, pref, topScore){
   function show(extra){
-    var seen = {}, merged = [];
-    visualCards.concat(extra || []).forEach(function(c){
-      if (c && c.id && !seen[c.id]){ seen[c.id] = 1; merged.push(c); }
-    });
+    var merged = [];
+    function rebuildMerged(){
+      var seen = {};
+      merged.length = 0;
+      visualCards.concat(extra || []).forEach(function(c){
+        if (c && c.id && !seen[c.id]){ seen[c.id] = 1; merged.push(c); }
+      });
+    }
+    rebuildMerged();
+    /* Visual details still landing stream into the merged list too —
+       registered before the picker/detail refresh below so the list is
+       rebuilt before anything re-renders from it. */
+    if (pref) pref.onFill(rebuildMerged);
     scanning = false;
-    presentVisualMatch(merged, scanThumb, true);
+    presentVisualMatch(merged, scanThumb, true, pref, topScore);
   }
   if (typeof Tesseract === "undefined"){ show([]); return; }
   var band = null;
@@ -1885,8 +2082,11 @@ function weakVisualPicker(visualCards, src, number, setSize, scanThumb){
 }
 function presentVisualResults(results, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize){
   /* Confidence is judged on the backend's own top score, before the
-     number tie-break reorders anything. */
-  var confident = typeof results[0].score === "number" && results[0].score >= VISUAL_CONFIDENT_SCORE;
+     number tie-break reorders anything. The same top score is what the
+     result status line reports, so the user can see exactly how sure
+     the visual match was. */
+  var topScore = typeof results[0].score === "number" ? results[0].score : null;
+  var confident = topScore !== null && topScore >= VISUAL_CONFIDENT_SCORE;
   var ordered = results.slice();
   /* Tie-break: the printed-number read agrees with a lower-ranked
      visual candidate — visual + number beats visual alone. */
@@ -1899,21 +2099,27 @@ function presentVisualResults(results, number, src, sourceLabel, scanThumb, name
     }
   }
   setScanStatus('<span class="spinner"></span>Your PC matched <b>' + esc(ordered[0].name || "a card") + '</b> — fetching its prices…');
-  fetchVisualDetails(ordered).then(function(cards){
+  /* Every candidate's detail fetch starts now, in parallel; only the
+     winner's own fetch gates what happens next. The rest keep filling
+     the live candidate list (and the session cache) in the background,
+     so their prices are already loaded wherever they're shown next. */
+  var pref = prefetchVisualDetails(ordered);
+  pref.winner.then(function(winnerCard){
     /* The winning card itself must have fetchable detail; without it
        there is nothing to present, so the OCR pipeline takes over. */
-    if (!cards.length || cards[0].id !== ordered[0].id){
+    if (!winnerCard){
       runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, false);
       return;
     }
+    var cards = pref.cards;
     if (confident){
       scanning = false;
-      presentVisualMatch(cards, scanThumb, false);
+      presentVisualMatch(cards, scanThumb, false, pref, topScore);
     } else if (state.mode === "batch"){
       scanning = false;
-      presentVisualMatch(cards, scanThumb, true);
+      presentVisualMatch(cards, scanThumb, true, pref, topScore);
     } else {
-      weakVisualPicker(cards, src, number, setSize, scanThumb);
+      weakVisualPicker(cards, src, number, setSize, scanThumb, pref, topScore);
     }
   });
 }
@@ -1922,12 +2128,13 @@ function presentVisualResults(results, number, src, sourceLabel, scanThumb, name
    size), whole-image read as the fallback. Reached when the visual
    backend can't settle the card, with the strip reads already in hand. */
 function runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, backendMissed){
+  if (backendMissed) scanPipelineNote = "PC backend unreachable — on-device scan used.";
   if (typeof Tesseract === "undefined"){
     handleOcrFailure(sourceLabel, "The card reader couldn't load. Check your connection — or search the name manually below.");
     return;
   }
   if (backendMissed){
-    setScanStatus('<span class="spinner"></span>PC backend unreachable — reading on-device instead…');
+    setScanStatus('<span class="spinner"></span>PC backend unreachable — on-device scan used');
   }
   // The name band crops to the center 60% horizontally: the full-width band
   // also catches the "STAGE 1" box on the left and "HP 90" on the right,
@@ -1962,6 +2169,11 @@ function runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSi
 function identifyCanvas(source, sourceLabel){
   if (scanning) return;
   scanning = true;
+  /* Live scan only: the frame is captured and the search is starting,
+     so the camera goes into standby until the flow comes back to the
+     live view. Photo identifications never touch the camera. */
+  if (sourceLabel === "frame") enterCameraStandby(source);
+  scanPipelineNote = "";
   setScanStatus('<span class="spinner"></span>Identifying the card…');
   var src = downscaleForOcr(source);
   /* Isolate the card before any OCR crop: when the yellow border is
@@ -2023,9 +2235,9 @@ function identifyCanvas(source, sourceLabel){
 
 function handleMatch(cards, readName, correction, scanThumb, scored){
   if (correction){
-    setScanStatus('Read <b>"' + esc(correction.raw) + '"</b> — matched <b>"' + esc(correction.corrected) + '"</b>. Confirm it\'s the right card.');
+    notedStatus('Read <b>"' + esc(correction.raw) + '"</b> — matched <b>"' + esc(correction.corrected) + '"</b>. Confirm it\'s the right card.');
   } else {
-    setScanStatus("Read <b>" + esc(readName) + "</b> — confirm it's the right card.");
+    notedStatus("Read <b>" + esc(readName) + "</b> — confirm it's the right card.");
   }
   var best = cards[0];
   var lowConf = cards.length > 1 && (cards[1].name || "").toLowerCase() !== (best.name || "").toLowerCase() || cards.length > 4;
@@ -2048,13 +2260,15 @@ function handleMatch(cards, readName, correction, scanThumb, scored){
       toast("Queued: " + best.name);
     }
     renderQueue();
+    /* Batch flow is back at the live view for the next card. */
+    wakeCamera();
   } else {
     /* Several candidates from the digit-confusion expansion and no decisive
        name winner: don't auto-open a guess — let the user pick. The batch
        path above never lands here; queued items already ask for a confirm
        tap instead. */
     if (cards.length > 1 && !nameScoreDecisive(scored)){
-      setScanStatus("Read <b>" + esc(readName) + "</b> — a few close matches. Pick the right one.");
+      notedStatus("Read <b>" + esc(readName) + "</b> — a few close matches. Pick the right one.");
       openCandidatePicker(cards, readName, scanThumb);
       return;
     }
@@ -2062,14 +2276,18 @@ function handleMatch(cards, readName, correction, scanThumb, scored){
   }
 }
 function handleNoMatch(msg){
-  setScanStatus(msg, true);
+  notedStatus(msg, true);
+  /* No sheet opens on a miss — the flow is already back at the live
+     scan view, so the camera wakes right away. (In batch mode the
+     queued placeholder below doesn't change that.) */
+  wakeCamera();
   if (state.mode === "batch"){
     state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: "Couldn't read it — tap to search manually" });
     renderQueue();
   }
 }
-function pushQueue(card, candidates, flagged, note, scanThumb){
-  state.queue.push({ id: uid(), card: card, candidates: candidates || [], flagged: !!flagged, note: note || "", scanThumb: scanThumb || null });
+function pushQueue(card, candidates, flagged, note, scanThumb, pref){
+  state.queue.push({ id: uid(), card: card, candidates: candidates || [], flagged: !!flagged, note: note || "", scanThumb: scanThumb || null, pref: pref || null });
 }
 function removeFromQueue(id){
   state.queue = state.queue.filter(function(q){ return q.id !== id; });
@@ -2100,12 +2318,15 @@ function renderQueue(){
         showView("scan");
         return;
       }
-      openDetail(q.card, { candidates: q.candidates.length ? q.candidates : null, queueId: q.id, scanThumb: q.scanThumb || null });
+      openDetail(q.card, { candidates: q.candidates.length ? q.candidates : null, queueId: q.id, scanThumb: q.scanThumb || null, pref: q.pref || null });
     });
   });
 }
 
 $("scanBtn").addEventListener("click", function(){
+  /* During standby a search is already in flight — the tap must not
+     restart the camera mid-search. */
+  if (cameraStandby) return;
   if (!stream){
     startCamera().catch(function(){});
     return;
@@ -2327,6 +2548,7 @@ $("setBackendUrl").addEventListener("change", function(){
   state.settings.backendUrl = this.value.trim().replace(/\/+$/, "");
   this.value = state.settings.backendUrl;
   persist();
+  checkBackendPill();
   toast(state.settings.backendUrl ? "Backend URL saved" : "Backend off — on-device scanning only");
 });
 $("testBackendBtn").addEventListener("click", function(){
@@ -2352,6 +2574,7 @@ $("testBackendBtn").addEventListener("click", function(){
 /* ================= init ================= */
 renderBinders();
 renderList();
+checkBackendPill();
 </script>
 </body>
 </html>
