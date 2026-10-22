@@ -62,10 +62,10 @@
   /* viewfinder */
   .finder{margin-top:14px;border-radius:18px;overflow:hidden;background:#0b0c0d;position:relative;aspect-ratio:4/4.6;max-height:430px;width:100%}
   .finder video{width:100%;height:100%;object-fit:cover;display:block}
-  .finder img.frozen{width:100%;height:100%;object-fit:cover;display:block}
+  .finder img.frozen{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);height:84%;aspect-ratio:63/88;object-fit:cover;display:block}
   .standby-tag{position:absolute;top:10px;left:10px;background:rgba(10,10,10,.72);color:#fff;font-size:12px;font-weight:600;padding:6px 11px;border-radius:99px;align-items:center}
   .standby-tag .spinner{border-color:rgba(255,255,255,.35);border-top-color:#fff}
-  .finder .frame{position:absolute;inset:9% 11%;border:2px solid rgba(255,255,255,.85);border-radius:14px;box-shadow:0 0 0 999px rgba(5,6,7,.42);pointer-events:none}
+  .finder .frame{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);height:84%;aspect-ratio:63/88;border:2px solid rgba(255,255,255,.85);border-radius:14px;box-shadow:0 0 0 999px rgba(5,6,7,.42);pointer-events:none}
   .finder .frame::after{content:"FIT CARD INSIDE FRAME";position:absolute;left:0;right:0;bottom:-26px;text-align:center;font-size:10px;letter-spacing:.14em;color:rgba(255,255,255,.75);font-weight:600}
   .finder .hint{position:absolute;inset:0;display:grid;place-items:center;color:#c9cdd2;text-align:center;padding:24px;font-size:13.5px}
   .finder .hint svg{width:44px;height:44px;margin-bottom:10px;opacity:.8}
@@ -393,7 +393,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-21d</p>
+      <p class="build-version">build 2026-10-21e</p>
     </section>
   </main>
 
@@ -1221,19 +1221,23 @@ $("stopCamBtn").addEventListener("click", stopCamera);
    NOT the full frame. Capturing the full frame anyway put the card at a
    different position and scale than the user framed it, so the OCR name
    band and number strips landed on table and background and read
-   gibberish. Returns the guide frame's rect in video pixels, slightly
-   expanded so a card edge resting on the frame line isn't clipped, or
-   null when the geometry can't be trusted (caller uses the full frame). */
+   gibberish. The guide frame element is the single source of truth for
+   the capture region: it is an exact 63:88 card-aspect box (see the
+   .finder .frame CSS), and its rendered rect — border box included, so
+   a card edge resting on the frame line stays in the shot — is mapped
+   back through the cover transform. captureFrame extracts exactly that
+   region: no additional zoom, no additional crop, no margin. Returns
+   null when the geometry can't be trusted (caller uses the full
+   frame). */
 function guideRectInVideo(vw, vh){
   var box = $("finder").getBoundingClientRect();
+  var fr = $("finderFrame").getBoundingClientRect();
   var cw = box.width, ch = box.height;
-  if (!cw || !ch || !vw || !vh) return null;
+  if (!cw || !ch || !vw || !vh || !fr.width || !fr.height) return null;
   var scale = Math.max(cw / vw, ch / vh); /* object-fit: cover */
   var offX = (cw - vw * scale) / 2, offY = (ch - vh * scale) / 2;
-  /* .finder .frame { inset: 9% 11% } — top/bottom 9% of the box height,
-     left/right 11% of the box width — plus a 3% breathing margin. */
-  var fx0 = cw * 0.11 - cw * 0.03, fx1 = cw * 0.89 + cw * 0.03;
-  var fy0 = ch * 0.09 - ch * 0.03, fy1 = ch * 0.91 + ch * 0.03;
+  var fx0 = fr.left - box.left, fy0 = fr.top - box.top;
+  var fx1 = fx0 + fr.width, fy1 = fy0 + fr.height;
   var x0 = Math.max(0, Math.floor((fx0 - offX) / scale));
   var y0 = Math.max(0, Math.floor((fy0 - offY) / scale));
   var x1 = Math.min(vw, Math.ceil((fx1 - offX) / scale));
@@ -1388,6 +1392,27 @@ function autoCropToCard(source){
   var c = document.createElement("canvas");
   c.width = b.w; c.height = b.h;
   c.getContext("2d").drawImage(source, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+  return c;
+}
+/* Fallback crop for a photo the border finder couldn't isolate: the
+   largest centered 63:88 (card aspect) crop of the image. Sending the
+   whole wide photo instead buries the card in table and background and
+   throws off both the visual match and the OCR band calibration; a
+   photo picked for identification is the card, roughly centered, so
+   the centered card-aspect crop is the honest approximation. Returns
+   null only when the source has no usable size. */
+function centeredCardCrop(source){
+  var sw = source.width, sh = source.height;
+  if (!sw || !sh) return null;
+  var ratio = 63 / 88; /* card width / height */
+  var w, h;
+  if (sw / sh > ratio){ h = sh; w = Math.round(sh * ratio); }
+  else { w = sw; h = Math.round(sw / ratio); }
+  if (w < 10 || h < 10) return null;
+  var x = Math.floor((sw - w) / 2), y = Math.floor((sh - h) / 2);
+  var c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(source, x, y, w, h, 0, 0, w, h);
   return c;
 }
 function scanThumbFromSource(source){
@@ -2179,13 +2204,20 @@ function identifyCanvas(source, sourceLabel){
   /* Isolate the card before any OCR crop: when the yellow border is
      found, the name band and number strips below are cut from the card
      alone instead of the whole photo, so the band/strip fractions land
-     where they were calibrated to land. No suitable yellow region means
-     the full image flows through exactly as before. */
+     where they were calibrated to land. No suitable border region: a
+     live frame is already exactly the guide box, so it flows through
+     as captured; an uploaded photo falls back to the largest centered
+     card-aspect crop rather than the whole wide frame — that crop
+     becomes the identification image and the "Scanned photo". */
   var isolated = null;
   try { isolated = autoCropToCard(src); } catch (e) { isolated = null; }
   if (isolated){
     src = isolated;
     setScanStatus('<span class="spinner"></span>Card found — identifying it…');
+  } else if (sourceLabel === "photo"){
+    var fb = null;
+    try { fb = centeredCardCrop(src); } catch (e) { fb = null; }
+    if (fb) src = fb;
   }
   var scanThumb = scanThumbFromSource(src);
   /* The embedded index is ready before any scan can begin. */
