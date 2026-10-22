@@ -393,7 +393,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-21f</p>
+      <p class="build-version">build 2026-10-21g</p>
     </section>
   </main>
 
@@ -1597,13 +1597,38 @@ function noCatalogMatch(candidates){
   scanning = false;
   handleNoMatch("Read “" + esc(candidates[0]) + "” but found no catalog match. Check the spelling in manual search below.");
 }
+/* Name-only last resort, run when the standard tiers are about to end in
+   the no-match dead end. Every standard tier lets a collector-number read
+   veto name hits (scoreResults drops results whose number differs from
+   the read), and an exact name read makes closestCatalogName return null
+   — "no correction needed" — which the fuzzy pass reads as failure. So a
+   correct name read can still dead-end on a card that is plainly in the
+   catalog. This pass searches by the name alone — the fuzzy-corrected
+   name when there is one, otherwise the raw read — with no number in the
+   query and no number filter on the results. Hits go to the candidate
+   picker; only an empty name-only search earns the no-match message. */
+function nameOnlyFallback(candidates, nameIndexForScan, scanThumb){
+  var rawRead = candidates && candidates[0];
+  if (!rawRead){ noCatalogMatch(candidates); return; }
+  var correction = closestCatalogName(rawRead, nameIndexForScan);
+  var safe = String(correction ? correction.name : rawRead).replace(/"/g, "").trim();
+  if (!safe){ noCatalogMatch(candidates); return; }
+  setScanStatus('<span class="spinner"></span>No match yet — searching the catalog for <b>' + esc(safe) + '</b> by name alone…');
+  apiFetchWithRetries('name:"' + safe + '*"', 24).then(function(cards){
+    if (!cards || !cards.length){ noCatalogMatch(candidates); return; }
+    scanning = false;
+    notedStatus('Read <b>"' + esc(rawRead) + '"</b> — found catalog matches by name. Pick the right one.');
+    openCandidatePicker(cards, rawRead, scanThumb,
+      'The full read didn\'t pin down a printing, so here is every catalog match for "' + safe + '". Tap the one you scanned.');
+  }).catch(function(){ noCatalogMatch(candidates); });
+}
 function tryFuzzyQueries(rawRead, candidates, number, setSize, nameIndexForScan, scanThumb){
   var correction = closestCatalogName(rawRead, nameIndexForScan);
-  if (!correction){ noCatalogMatch(candidates); return; }
+  if (!correction){ nameOnlyFallback(candidates, nameIndexForScan, scanThumb); return; }
   var jobs = queryJobsForName(correction.name, number, setSize);
   var scoreNames = [correction.name].concat(candidates);
   (function tryNext(i){
-    if (i >= jobs.length){ noCatalogMatch(candidates); return; }
+    if (i >= jobs.length){ nameOnlyFallback(candidates, nameIndexForScan, scanThumb); return; }
     apiFetchWithRetries(jobs[i].q, 12).then(function(cards){
       var next = nextQueryIndex(jobs, i, cards.length > 0);
       if (!cards.length) return tryNext(next);
