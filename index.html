@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-10-21i</p>
+      <p class="build-version">build 2026-11-01j</p>
     </section>
   </main>
 
@@ -2043,20 +2043,57 @@ function handleOcrFailure(sourceLabel, msg){
     surfaceManualSearch();
   }
 }
+/* 21j fail-fast: a configured backend that didn't settle the scan
+   (timeout, HTTP error, empty answer) or a fast recheck that proved
+   it offline. The scan errors plainly instead of silently falling
+   back to the slow on-device path — the user retries with the scan
+   button, or explicitly chooses the on-device path with the button
+   below. The button is omitted when the failure happened before any
+   scan image was processed (offline gate): there the remedy is
+   starting the server, and the message says so. */
+var lastFailedScan = null;
+function scanOnDeviceAnyway(){
+  var f = lastFailedScan;
+  lastFailedScan = null;
+  if (!f) return;
+  scanning = true;
+  setScanStatus('<span class="spinner"></span>PC backend skipped — on-device scan used');
+  runOcrFlow(f.src, f.sourceLabel, f.scanThumb, f.nameIndexForScan, f.number, f.setSize, true);
+}
+function handleBackendFailure(sourceLabel, offline){
+  scanning = false;
+  var msg = offline
+    ? "PC backend is offline — start the server on your PC, then try again."
+    : "PC backend didn't answer in time — the server may be busy. Try again.";
+  setScanStatus(msg + (lastFailedScan ? ' <button onclick="scanOnDeviceAnyway()">Scan on-device anyway</button>' : ''), true);
+  wakeCamera();
+  if (state.mode === "batch"){
+    state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: "Backend didn't answer — tap to search manually" });
+    renderQueue();
+    toast("Backend didn't answer — skipped, keep going");
+  } else {
+    surfaceManualSearch();
+  }
+}
 
 /* ================= visual backend (home PC) =================
    The cropped card image is sent to the DINOv2 service on the home PC,
    which answers with its top visual matches (cosine similarity, 1.0 =
-   identical art). A confident answer replaces the name-band OCR read
-   entirely; anything less — a weak score, an empty answer, a timeout,
-   an unreachable PC — falls back to the on-device OCR pipeline below,
-   exactly as scans behaved before the backend existed. The collector
-   number read from the bottom strips still runs either way: when it
-   agrees with a lower-ranked visual candidate, that candidate wins.
-   Mid-confidence answers (top score 0.5–0.85) also get one quick
-   name-band check before presenting — against the visual candidates
-   first, then against the full catalog name index — see
-   nameCheckPromote below. */
+   identical art) plus its own EasyOCR read of the name band and number
+   strip. A confident answer replaces the name-band OCR read entirely.
+   Mid-confidence answers (top score 0.5–0.85) get a name check before
+   presenting — against the server's name read first (no extra OCR
+   pass), falling back to the on-device band read only when the server
+   had no name. The collector number read from the bottom strips still
+   runs either way: when it agrees with a lower-ranked visual candidate,
+   that candidate wins.
+   21j fail-fast rule: a configured backend that doesn't settle the
+   card — timeout, HTTP error, empty answer — ERRORS plainly (see
+   handleBackendFailure) instead of silently falling back to the slow
+   on-device pipeline. The 8-second timeout is that fail-fast line, not
+   a budget to raise: identification is either fast or it says so. The
+   only silent on-device path left is no backend URL configured at all,
+   plus the explicit "Scan on-device anyway" button on the error. */
 var VISUAL_TIMEOUT_MS = 8000;
 var VISUAL_CONFIDENT_SCORE = 0.5;
 /* Mid-confidence band for the name check: a top score at or above the
@@ -2073,6 +2110,12 @@ function backendBase(){
    the app regains focus, so a PC that went to sleep (or a Tailscale
    toggle) is reflected without a reload. */
 var backendPillInFlight = false;
+/* Last known backend reachability from the pill: true = Online,
+   false = Offline with a URL configured, null = unknown or no URL.
+   identifyCanvas consults it for the 21j fail-fast gate: a known
+   Offline pill skips the doomed server attempt after one fast
+   /health recheck (guards against a stale pill). */
+var backendOnline = null;
 function checkBackendPill(){
   var dot = $("backendDot"), txt = $("backendPillText");
   if (!dot || !txt) return;
@@ -2080,6 +2123,7 @@ function checkBackendPill(){
   if (!base){
     dot.className = "bp-dot";
     txt.textContent = "PC backend: Not set";
+    backendOnline = null;
     return;
   }
   if (backendPillInFlight) return;
@@ -2096,23 +2140,48 @@ function checkBackendPill(){
     if (j && j.status === "ok"){
       dot.className = "bp-dot on";
       txt.textContent = "PC backend: Online";
+      backendOnline = true;
     } else {
       dot.className = "bp-dot off";
       txt.textContent = "PC backend: Offline";
+      backendOnline = false;
     }
   }).catch(function(){
     clearTimeout(timer);
     backendPillInFlight = false;
     dot.className = "bp-dot off";
     txt.textContent = "PC backend: Offline";
+    backendOnline = false;
   });
 }
 window.addEventListener("focus", checkBackendPill);
 document.addEventListener("visibilitychange", function(){
   if (!document.hidden) checkBackendPill();
 });
-/* Resolves to the backend's results array, or null on any failure:
-   no URL configured, timeout, HTTP error, or an empty result list. */
+/* Uploads a downscaled copy: the matcher only needs a few hundred
+   pixels per side, and a multi-megabyte phone photo over the relay is
+   where most of a scan's seconds went. 1024px on the long edge at
+   JPEG 0.82 keeps the card legible while cutting the upload to a
+   fraction of its size. */
+function downscaleForUpload(canvas){
+  var max = 1024;
+  var longest = Math.max(canvas.width, canvas.height);
+  if (!longest || longest <= max) return canvas;
+  var scale = max / longest;
+  var c = document.createElement("canvas");
+  c.width = Math.round(canvas.width * scale);
+  c.height = Math.round(canvas.height * scale);
+  c.getContext("2d").drawImage(canvas, 0, 0, c.width, c.height);
+  return c;
+}
+/* Resolves to { results, ocr, failure }: results is the backend's
+   array on success, ocr is its server-side name/number read (or null
+   when the reader is unavailable), and failure is "timeout", "http",
+   "error", or "empty" when a configured backend didn't settle the
+   card. The promise resolves null only when no URL is configured at
+   all. Callers must NOT silently fall back to on-device OCR on a
+   failure — the 21j rule is recognize fast or say so (see
+   handleBackendFailure). */
 function visualIdentify(canvas){
   var base = backendBase();
   if (!base) return Promise.resolve(null);
@@ -2120,8 +2189,8 @@ function visualIdentify(canvas){
     var settled = false;
     function finish(v){ if (!settled){ settled = true; resolve(v); } }
     try {
-      canvas.toBlob(function(blob){
-        if (!blob){ finish(null); return; }
+      downscaleForUpload(canvas).toBlob(function(blob){
+        if (!blob){ finish({ results: null, ocr: null, failure: "error" }); return; }
         var fd = new FormData();
         fd.append("photo", blob, "card.jpg");
         var controller = new AbortController();
@@ -2132,13 +2201,17 @@ function visualIdentify(canvas){
           return r.json();
         }).then(function(j){
           var res = (j && Array.isArray(j.results)) ? j.results.filter(function(x){ return x && x.id; }) : [];
-          finish(res.length ? res : null);
-        }).catch(function(){
+          if (res.length){
+            finish({ results: res, ocr: (j && j.ocr) || null, failure: null });
+          } else {
+            finish({ results: null, ocr: (j && j.ocr) || null, failure: "empty" });
+          }
+        }).catch(function(e){
           clearTimeout(timer);
-          finish(null);
+          finish({ results: null, ocr: null, failure: (e && e.name === "AbortError") ? "timeout" : "http" });
         });
-      }, "image/jpeg", 0.85);
-    } catch (e) { finish(null); }
+      }, "image/jpeg", 0.82);
+    } catch (e) { finish({ results: null, ocr: null, failure: "error" }); }
   });
 }
 /* Full catalog detail for one backend result id ("sm8-123"), fetched
@@ -2568,6 +2641,35 @@ function quickNameBandText(src){
    already sit among the visual candidates belongs to the visual
    path — if it didn't promote there, the catalog path won't force
    it either. */
+/* The name-promotion rules shared by the Tesseract name check and the
+   server-OCR name check: a visual-candidate name win moves that card
+   to the front, else a unique strong catalog-wide name win inserts
+   its printing at the front. The number tie-break outranks both, and
+   a name already among the candidates never forces a move. Returns
+   true only when the order changed. `reads` are cleaned name strings. */
+function promoteByNameReads(reads, ordered, numberWinnerId, number){
+  if (!reads.length) return false;
+  var winner = bestVisualNameMatch(reads, ordered);
+  if (winner){
+    if (ordered[0] && ordered[0].id === winner.id) return false;
+    if (numberWinnerId && numberWinnerId !== winner.id) return false;
+    for (var i = 1; i < ordered.length; i++){
+      if (ordered[i] && ordered[i].id === winner.id){
+        ordered.unshift(ordered.splice(i, 1)[0]);
+        return true;
+      }
+    }
+    return false;
+  }
+  var group = bestCatalogNameMatch(reads);
+  if (!group) return false;
+  var alreadyCandidate = ordered.some(function(c){ return c && group.ids.indexOf(c.id) >= 0; });
+  if (alreadyCandidate) return false;
+  var chosenId = catalogPrintingForName(group, number);
+  if (numberWinnerId && numberWinnerId !== chosenId) return false;
+  ordered.unshift({ id: chosenId, name: group.name });
+  return true;
+}
 function nameCheckPromote(src, ordered, numberWinnerId, number){
   return quickNameBandText(src).then(function(text){
     if (!text) return false;
@@ -2580,30 +2682,21 @@ function nameCheckPromote(src, ordered, numberWinnerId, number){
       var c = cleanNameRead(r);
       if (c && !seenReads[c]){ seenReads[c] = 1; reads.push(c); }
     });
-    if (!reads.length) return false;
-    var winner = bestVisualNameMatch(reads, ordered);
-    if (winner){
-      if (ordered[0] && ordered[0].id === winner.id) return false;
-      if (numberWinnerId && numberWinnerId !== winner.id) return false;
-      for (var i = 1; i < ordered.length; i++){
-        if (ordered[i] && ordered[i].id === winner.id){
-          ordered.unshift(ordered.splice(i, 1)[0]);
-          return true;
-        }
-      }
-      return false;
-    }
-    var group = bestCatalogNameMatch(reads);
-    if (!group) return false;
-    var alreadyCandidate = ordered.some(function(c){ return c && group.ids.indexOf(c.id) >= 0; });
-    if (alreadyCandidate) return false;
-    var chosenId = catalogPrintingForName(group, number);
-    if (numberWinnerId && numberWinnerId !== chosenId) return false;
-    ordered.unshift({ id: chosenId, name: group.name });
-    return true;
+    return promoteByNameReads(reads, ordered, numberWinnerId, number);
   }).catch(function(){ return false; });
 }
-function presentVisualResults(results, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize){
+/* Server-OCR name reads: same cleaning, same rules, no Tesseract, no
+   wait — the PC already read the name band. */
+function serverNameReads(serverOcr){
+  if (!serverOcr || !serverOcr.name) return [];
+  var reads = [], seenReads = {};
+  bandNameCandidates(serverOcr.name).forEach(function(r){
+    var c = cleanNameRead(r);
+    if (c && !seenReads[c]){ seenReads[c] = 1; reads.push(c); }
+  });
+  return reads;
+}
+function presentVisualResults(results, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize, serverOcr){
   /* Confidence is judged on the backend's own top score, before the
      number tie-break reorders anything. The same top score is what the
      result status line reports, so the user can see exactly how sure
@@ -2627,16 +2720,24 @@ function presentVisualResults(results, number, src, sourceLabel, scanThumb, name
     }
     if (!numberWinnerId && ordered[0] && numberMatches(ordered[0].number, number)) numberWinnerId = ordered[0].id;
   }
-  /* Mid-confidence band: before anything is presented, one quick
-     name-band read gets a say (single and batch alike). Confident
-     scans (>= VISUAL_NAME_CHECK_MAX) skip it entirely and stay as
-     fast as ever; the weak/picker path below it is untouched. */
+  /* Mid-confidence band: before anything is presented, the name gets
+     a say (single and batch alike). The server's name read goes
+     first — it costs no Tesseract pass and no wait. Only when the
+     server had no name read does the on-device band check run.
+     Confident scans (>= VISUAL_NAME_CHECK_MAX) skip it entirely and
+     stay as fast as ever; the weak/picker path below it is untouched. */
   var midConfidence = topScore !== null && topScore >= VISUAL_CONFIDENT_SCORE && topScore < VISUAL_NAME_CHECK_MAX;
   if (midConfidence){
-    setScanStatus('<span class="spinner"></span>Checking the card name…');
-    nameCheckPromote(src, ordered, numberWinnerId, number).then(function(promoted){
+    var sReads = serverNameReads(serverOcr);
+    if (sReads.length){
+      var promoted = promoteByNameReads(sReads, ordered, numberWinnerId, number);
       presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, scanThumb, nameIndexForScan, setSize, number, promoted);
-    });
+    } else {
+      setScanStatus('<span class="spinner"></span>Checking the card name…');
+      nameCheckPromote(src, ordered, numberWinnerId, number).then(function(promoted){
+        presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, scanThumb, nameIndexForScan, setSize, number, promoted);
+      });
+    }
   } else {
     presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, scanThumb, nameIndexForScan, setSize, number, false);
   }
@@ -2725,7 +2826,16 @@ function identifyCanvas(source, sourceLabel){
      live view. Photo identifications never touch the camera. */
   if (sourceLabel === "frame") enterCameraStandby(source);
   scanPipelineNote = "";
+  lastFailedScan = null;
   setScanStatus('<span class="spinner"></span>Identifying the card…');
+  /* 21j fail-fast gate: the body below runs as proceed(). When the
+     pill already knows the backend is offline, one fast /health
+     recheck guards against a stale pill — /health answers instantly
+     when the PC is up — and only a failed recheck errors out, before
+     any strip OCR or server attempt burns seconds. When the pill is
+     Online (or unknown), the scan proceeds and any backend failure
+     below errors instead of silently falling back. */
+  function proceed(){
   var src = downscaleForOcr(source);
   /* Isolate the card before any OCR crop: when the yellow border is
      found, the name band and number strips below are cut from the card
@@ -2748,6 +2858,8 @@ function identifyCanvas(source, sourceLabel){
   var scanThumb = scanThumbFromSource(src);
   /* The embedded index is ready before any scan can begin. */
   var nameIndexForScan = cardNameIndex;
+  /* Kept for the fail-fast error's "Scan on-device anyway" button. */
+  lastFailedScan = { src: src, sourceLabel: sourceLabel, scanThumb: scanThumb, nameIndexForScan: nameIndexForScan, number: null, setSize: null };
   // The number strips read BOTH bottom corners: the left crop is a tight
   // box (x 12-38%, y 86-93%) around where most sets print the number,
   // below the illustrator credit — the weakness bar above and the
@@ -2765,7 +2877,19 @@ function identifyCanvas(source, sourceLabel){
   var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
   var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
   var visualRun = visualIdentify(src);
+  /* Fail-fast race: a configured backend that doesn't settle the card
+     errors the moment its answer (or lack of one) lands, instead of
+     waiting out the strip reads and then silently falling back. The
+     Promise.all handler below ignores everything once this fired. */
+  var visualFailed = false;
+  visualRun.then(function(v){
+    if (v && v.results) return;
+    if (!backendBase()) return;
+    visualFailed = true;
+    handleBackendFailure(sourceLabel, false);
+  });
   Promise.all([numRunL, numRunR, visualRun]).then(function(reads){
+    if (visualFailed) return;
     var numTextL = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var numTextR = (reads[1] && reads[1].data && reads[1].data.text) || "";
     /* Pick the corner read to trust: a clean "123/214" slash pair beats a
@@ -2778,20 +2902,52 @@ function identifyCanvas(source, sourceLabel){
       : (parsedL || parsedR);
     var number = parsed ? parsed.number : null;
     var setSize = parsed ? parsed.setSize : null;
-    var visual = reads[2];
+    lastFailedScan.number = number;
+    lastFailedScan.setSize = setSize;
+    var v = reads[2];
+    var visual = (v && v.results) || null;
+    var serverOcr = (v && v.ocr) || null;
     if (visual && visual.length){
-      presentVisualResults(visual, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize);
+      /* Server number as the tie-break's second source: only when the
+         strips produced nothing. It is strict-pattern or null (see
+         the backend), so a match here is as trustworthy as a strip
+         match — and it costs no extra read. */
+      if (!number && serverOcr && serverOcr.number){
+        var sp = String(serverOcr.number).split("/");
+        if (sp.length === 2){ number = sp[0]; setSize = sp[1]; }
+      }
+      presentVisualResults(visual, number, src, sourceLabel, scanThumb, nameIndexForScan, setSize, serverOcr);
+    } else if (backendBase()){
+      /* Unreachable here only if the race above somehow didn't fire
+         (it always runs first); stay failed, never silently fall back. */
+      handleBackendFailure(sourceLabel, false);
     } else {
-      /* Backend failure, timeout, or no matches: the on-device pipeline
-         takes over, and the status says so. */
-      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, !!backendBase());
+      /* No backend URL configured: the plain on-device flow, exactly
+         as before the backend existed. */
+      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, false);
     }
   }).catch(function(){
-    /* The identification chain itself failed somewhere along the way;
-       the visual backend was part of it whenever one is configured,
-       so the on-device fallback labels its provenance the same way. */
-    runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, !!backendBase());
+    if (visualFailed) return;
+    /* The identification chain itself failed somewhere along the way. */
+    if (backendBase()){ handleBackendFailure(sourceLabel, false); }
+    else { runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, false); }
   });
+  }
+  /* The gate itself: known-Offline pill → one fast recheck, else go. */
+  if (backendBase() && backendOnline === false){
+    var hc = new AbortController();
+    var ht = setTimeout(function(){ hc.abort(); }, 3000);
+    fetch(backendBase() + "/health", { signal: hc.signal }).then(function(r){
+      clearTimeout(ht);
+      if (r.ok){ backendOnline = true; proceed(); }
+      else { handleBackendFailure(sourceLabel, true); }
+    }).catch(function(){
+      clearTimeout(ht);
+      handleBackendFailure(sourceLabel, true);
+    });
+  } else {
+    proceed();
+  }
 }
 
 function handleMatch(cards, readName, correction, scanThumb, scored){
