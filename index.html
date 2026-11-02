@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-11-01k</p>
+      <p class="build-version">build 2026-11-01l</p>
     </section>
   </main>
 
@@ -838,9 +838,14 @@ function renderDetail(){
   $("dRarity").innerHTML = c.rarity ? "Rarity: <b>"+esc(c.rarity)+"</b>" : "";
   $("dScannedPhoto").innerHTML = scannedPhotoHtml(detail.scanThumb, false);
   var note = $("dScanNote");
+  var noteHtml = "";
+  if (c.noPrices){
+    noteHtml += '<div class="snap-note" style="background:var(--warn-soft);color:var(--warn);border-radius:9px;padding:8px 11px;margin-top:12px">No prices could be fetched for this card — the price catalog may not carry it yet, or the fetch failed. The match above comes from your PC. <button onclick="retryPrices()">Retry prices</button></div>';
+  }
   if (detail.queueId){
-    note.innerHTML = '<div class="snap-note" style="background:var(--warn-soft);color:var(--warn);border-radius:9px;padding:8px 11px;margin-top:12px">From the batch queue — double-check this is the right card before confirming.</div>';
-  } else note.innerHTML = "";
+    noteHtml += '<div class="snap-note" style="background:var(--warn-soft);color:var(--warn);border-radius:9px;padding:8px 11px;margin-top:12px">From the batch queue — double-check this is the right card before confirming.</div>';
+  }
+  note.innerHTML = noteHtml;
 
   var keys = printingKeys(c);
   $("dPrintings").innerHTML = keys.length ? keys.map(function(k){
@@ -879,12 +884,12 @@ function renderDetail(){
   var priceKey = effectivePriceKey(c, detail);
   $("dConds").innerHTML = CONDITIONS.map(function(cond){
     var price = condPrice(c, priceKey, cond);
-    var w = price ? worthIt(price) : 0;
+    var w = price ? worthIt(price) : null;
     return '<button class="cond-row" data-cond="'+cond.key+'" '+(price==null?"disabled style=opacity:.45":"")+'>' +
       '<span class="cond-ab">'+cond.ab+'</span>' +
       '<span class="cond-mid"><span class="cp">'+(price==null?"No price":money(price))+'</span>' +
       (cond.key!=="nm" ? ' <span style="font-size:11px;color:var(--ink2)">est. from NM</span>' : "") +
-      '<br><span class="cw">WorthIt: buy at <b'+(w>0?"":' class="zero"')+'>'+money(w)+'</b> or under</span></span>' +
+      '<br><span class="cw">'+(w==null ? 'WorthIt: no price data' : 'WorthIt: buy at <b'+(w>0?"":' class="zero"')+'>'+money(w)+'</b> or under')+'</span></span>' +
       '<span class="cond-chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></button>';
   }).join("");
   $("dConds").querySelectorAll("[data-cond]").forEach(function(b){
@@ -898,7 +903,8 @@ function renderDetail(){
     ? '<div style="margin:2px 0 8px"><span class="flag-amber">Price needs research</span></div>' +
       '<div class="research-note" style="margin:0 0 9px">TCGplayer prices this pattern under standard Holofoil — verify the market before listing. Prices below are the standard Holofoil market price.</div>'
     : "";
-  $("dSnapNote").textContent = "Prices snapshotted " + t.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}) +
+  $("dSnapNote").textContent = c.noPrices ? "No prices available for this card — use Retry prices above, or check the price catalog later." :
+    "Prices snapshotted " + t.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}) +
     " from TCGplayer market (NM). Played conditions are estimated from NM with your Settings factors.";
 
   /* The "Not this card?" button shows whenever a genuinely different
@@ -2060,6 +2066,29 @@ function scanOnDeviceAnyway(){
   setScanStatus('<span class="spinner"></span>PC backend skipped — on-device scan used');
   runOcrFlow(f.src, f.sourceLabel, f.scanThumb, f.nameIndexForScan, f.number, f.setSize, true);
 }
+/* 21l: a priceless card's Retry prices button. The failed fetch is
+   cached by id, so the cache entry is dropped first — otherwise the
+   retry would just replay the same null. A landed fetch swaps the
+   card in place (printing reset the way openDetail sets it) and the
+   sheet re-renders priced; a miss leaves the priceless card up. */
+function retryPrices(){
+  if (!detail || !detail.card || !detail.card.noPrices) return;
+  var c = detail.card;
+  delete detailCache[c.id];
+  fetchCardDetail(c.id).then(function(card2){
+    if (!detail || detail.card !== c) return;
+    if (card2){
+      var keys = printingKeys(card2);
+      detail.card = card2;
+      detail.printing = keys.indexOf("holofoil")>=0 ? "holofoil" : (keys[0]||"normal");
+      detail.snapshotAt = Date.now();
+      renderDetail();
+      toast("Prices loaded for " + card2.name);
+    } else {
+      toast("Still no prices for " + c.name);
+    }
+  });
+}
 function handleBackendFailure(sourceLabel, offline, customMsg){
   scanning = false;
   var msg = customMsg || (offline
@@ -2094,10 +2123,11 @@ function handleBackendFailure(sourceLabel, offline, customMsg){
    a budget to raise: identification is either fast or it says so. The
    only silent on-device path left is no backend URL configured at all,
    plus the explicit "Scan on-device anyway" button on the error.
-   21k: a winner whose prices can't be fetched errors the same way
-   (it was the last silent on-device handoff in 21j) — and a settled
-   answer presents without waiting for the strip reads when the
-   strips have nothing to add (confident top, or a server number). */
+   21l: a winner whose prices can't be fetched is shown priceless
+   instead of erroring (it was a silent on-device handoff in 21j) —
+   and a settled answer presents without waiting for the strip reads
+   when the strips have nothing to add (confident top, or a server
+   number). */
 var VISUAL_TIMEOUT_MS = 8000;
 var VISUAL_CONFIDENT_SCORE = 0.5;
 /* Mid-confidence band for the name check: a top score at or above the
@@ -2758,24 +2788,38 @@ function presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, sc
      so their prices are already loaded wherever they're shown next. */
   var pref = prefetchVisualDetails(ordered);
   pref.winner.then(function(winnerCard){
-    /* 21k: the winning card itself must have fetchable detail — and
-       when it doesn't, the scan ERRORS instead of silently handing
-       off to the on-device reader. That handoff (21j and earlier) is
-       how a correct visual match became a grossly wrong presented
-       card with no correct alternate: the price catalog has no row
-       for the backend's id (a set numbering it doesn't share — e.g.
-       sv09-080 404s in the price API) or the fetch itself failed,
-       and the on-device guess then replaced the right answer. The
-       error names the visual top so the user knows what the PC
-       thought it was; retry covers a transient fetch failure,
-       manual search covers a catalog gap, and the button below is
-       the only on-device route — explicit, never silent. */
+    /* 21l: the winning card itself must have fetchable detail to show
+       prices — but when it doesn't, the scan still SHOWS the match
+       instead of erroring or silently guessing. The PC's
+       identification (name, set, number) is real data; only the
+       price-catalog row is missing (a set numbering the catalog
+       doesn't share — e.g. sv09-080 404s there — or a failed fetch).
+       So the winner is presented as a priceless card: its picture is
+       the scanned photo, its condition rows are disabled (nothing
+       gets added at a wrong price), and a Retry prices button covers
+       transient failures. The fetched visual candidates ride along
+       as "Not this card?" alternates, so a wrong top still has its
+       options one tap away. */
     if (!winnerCard){
-      lastFailedScan = { src: src, sourceLabel: sourceLabel, scanThumb: scanThumb, nameIndexForScan: nameIndexForScan, number: number, setSize: setSize };
-      handleBackendFailure(sourceLabel, false,
-        "Your PC matched <b>" + esc(ordered[0].name || "a card") + "</b>" +
-        (typeof topScore === "number" ? " (score " + topScore.toFixed(2) + ")" : "") +
-        " but its prices couldn't be fetched — it may not be in the price catalog yet. Try again, or search manually below.");
+      var w = ordered[0];
+      var priceless = {
+        id: w.id, name: w.name || "Unknown card", number: w.number || null,
+        set: { name: w.setName || "" }, rarity: null,
+        images: { small: scanThumb, large: scanThumb },
+        tcgplayer: null, noPrices: true
+      };
+      scanning = false;
+      setScanStatus("Your PC matched <b>" + esc(w.name || "a card") + "</b> — prices couldn't be fetched, showing the match without prices.");
+      if (state.mode === "batch"){
+        pushQueue(priceless, pref.cards, true, "No price data — needs a look", scanThumb, pref);
+        renderQueue();
+        toast("Queued: " + priceless.name + " (no prices)");
+        wakeCamera();
+      } else if (confident){
+        openDetail(priceless, { candidates: pref.cards, scanThumb: scanThumb, pref: pref });
+      } else {
+        weakVisualPicker([priceless].concat(pref.cards), src, number, setSize, scanThumb, pref, topScore);
+      }
       return;
     }
     var cards = pref.cards;
