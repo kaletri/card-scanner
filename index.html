@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-11-01j</p>
+      <p class="build-version">build 2026-11-01k</p>
     </section>
   </main>
 
@@ -2060,15 +2060,15 @@ function scanOnDeviceAnyway(){
   setScanStatus('<span class="spinner"></span>PC backend skipped — on-device scan used');
   runOcrFlow(f.src, f.sourceLabel, f.scanThumb, f.nameIndexForScan, f.number, f.setSize, true);
 }
-function handleBackendFailure(sourceLabel, offline){
+function handleBackendFailure(sourceLabel, offline, customMsg){
   scanning = false;
-  var msg = offline
+  var msg = customMsg || (offline
     ? "PC backend is offline — start the server on your PC, then try again."
-    : "PC backend didn't answer in time — the server may be busy. Try again.";
+    : "PC backend didn't answer in time — the server may be busy. Try again.");
   setScanStatus(msg + (lastFailedScan ? ' <button onclick="scanOnDeviceAnyway()">Scan on-device anyway</button>' : ''), true);
   wakeCamera();
   if (state.mode === "batch"){
-    state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: "Backend didn't answer — tap to search manually" });
+    state.queue.push({ id: uid(), card: null, candidates: [], flagged: true, note: customMsg ? "Prices couldn't be fetched — tap to search manually" : "Backend didn't answer — tap to search manually" });
     renderQueue();
     toast("Backend didn't answer — skipped, keep going");
   } else {
@@ -2093,7 +2093,11 @@ function handleBackendFailure(sourceLabel, offline){
    on-device pipeline. The 8-second timeout is that fail-fast line, not
    a budget to raise: identification is either fast or it says so. The
    only silent on-device path left is no backend URL configured at all,
-   plus the explicit "Scan on-device anyway" button on the error. */
+   plus the explicit "Scan on-device anyway" button on the error.
+   21k: a winner whose prices can't be fetched errors the same way
+   (it was the last silent on-device handoff in 21j) — and a settled
+   answer presents without waiting for the strip reads when the
+   strips have nothing to add (confident top, or a server number). */
 var VISUAL_TIMEOUT_MS = 8000;
 var VISUAL_CONFIDENT_SCORE = 0.5;
 /* Mid-confidence band for the name check: a top score at or above the
@@ -2754,13 +2758,24 @@ function presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, sc
      so their prices are already loaded wherever they're shown next. */
   var pref = prefetchVisualDetails(ordered);
   pref.winner.then(function(winnerCard){
-    /* The winning card itself must have fetchable detail; without it
-       there is nothing to present, so the OCR pipeline takes over.
-       The backend was consulted for this scan and its answer proved
-       unusable, so the on-device result carries the provenance note
-       like every other backend-consulted fallback. */
+    /* 21k: the winning card itself must have fetchable detail — and
+       when it doesn't, the scan ERRORS instead of silently handing
+       off to the on-device reader. That handoff (21j and earlier) is
+       how a correct visual match became a grossly wrong presented
+       card with no correct alternate: the price catalog has no row
+       for the backend's id (a set numbering it doesn't share — e.g.
+       sv09-080 404s in the price API) or the fetch itself failed,
+       and the on-device guess then replaced the right answer. The
+       error names the visual top so the user knows what the PC
+       thought it was; retry covers a transient fetch failure,
+       manual search covers a catalog gap, and the button below is
+       the only on-device route — explicit, never silent. */
     if (!winnerCard){
-      runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, true);
+      lastFailedScan = { src: src, sourceLabel: sourceLabel, scanThumb: scanThumb, nameIndexForScan: nameIndexForScan, number: number, setSize: setSize };
+      handleBackendFailure(sourceLabel, false,
+        "Your PC matched <b>" + esc(ordered[0].name || "a card") + "</b>" +
+        (typeof topScore === "number" ? " (score " + topScore.toFixed(2) + ")" : "") +
+        " but its prices couldn't be fetched — it may not be in the price catalog yet. Try again, or search manually below.");
       return;
     }
     var cards = pref.cards;
@@ -2877,19 +2892,41 @@ function identifyCanvas(source, sourceLabel){
   var numRunL = stripL ? ocrRecognize(stripL, 3).catch(function(){ return null; }) : Promise.resolve(null);
   var numRunR = stripR ? ocrRecognize(stripR, 3).catch(function(){ return null; }) : Promise.resolve(null);
   var visualRun = visualIdentify(src);
-  /* Fail-fast race: a configured backend that doesn't settle the card
-     errors the moment its answer (or lack of one) lands, instead of
-     waiting out the strip reads and then silently falling back. The
-     Promise.all handler below ignores everything once this fired. */
+  /* 21k early present + fail-fast race: a configured backend that
+     doesn't settle the card errors the moment its answer (or lack of
+     one) lands, instead of waiting out the strip reads and then
+     silently falling back. And a settled answer presents the moment
+     it lands whenever the strips have nothing to add — a confident
+     visual top, or a server number for the tie-break — instead of
+     waiting out the on-device strip reads, which were the slow tail
+     after the server itself went sub-second. The Promise.all handler
+     below ignores everything once either of these fired. */
   var visualFailed = false;
+  var visualPresented = false;
   visualRun.then(function(v){
-    if (v && v.results) return;
+    if (v && v.results){
+      var vs = (v.results[0] && typeof v.results[0].score === "number") ? v.results[0].score : null;
+      var sNum = null, sSet = null;
+      if (v.ocr && v.ocr.number){
+        var sp = String(v.ocr.number).split("/");
+        if (sp.length === 2){ sNum = sp[0]; sSet = sp[1]; }
+      }
+      /* Early present: confident (>= 0.85, no name check gates it) or
+         the server number already answers the tie-break. Mid-band
+         without a server number still waits for the strips — they're
+         the only number source there, and the name check wants them. */
+      if (vs !== null && (vs >= VISUAL_NAME_CHECK_MAX || sNum)){
+        visualPresented = true;
+        presentVisualResults(v.results, sNum, src, sourceLabel, scanThumb, nameIndexForScan, sSet, v.ocr);
+      }
+      return;
+    }
     if (!backendBase()) return;
     visualFailed = true;
     handleBackendFailure(sourceLabel, false);
   });
   Promise.all([numRunL, numRunR, visualRun]).then(function(reads){
-    if (visualFailed) return;
+    if (visualFailed || visualPresented) return;
     var numTextL = (reads[0] && reads[0].data && reads[0].data.text) || "";
     var numTextR = (reads[1] && reads[1].data && reads[1].data.text) || "";
     /* Pick the corner read to trust: a clean "123/214" slash pair beats a
@@ -2927,7 +2964,7 @@ function identifyCanvas(source, sourceLabel){
       runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, number, setSize, false);
     }
   }).catch(function(){
-    if (visualFailed) return;
+    if (visualFailed || visualPresented) return;
     /* The identification chain itself failed somewhere along the way. */
     if (backendBase()){ handleBackendFailure(sourceLabel, false); }
     else { runOcrFlow(src, sourceLabel, scanThumb, nameIndexForScan, null, null, false); }
