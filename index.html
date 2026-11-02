@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-11-01l</p>
+      <p class="build-version">build 2026-11-01m</p>
     </section>
   </main>
 
@@ -2075,7 +2075,7 @@ function retryPrices(){
   if (!detail || !detail.card || !detail.card.noPrices) return;
   var c = detail.card;
   delete detailCache[c.id];
-  fetchCardDetail(c.id).then(function(card2){
+  fetchCardDetail(c.id, { name: c.name, setName: (c.set && c.set.name) || "", number: c.number }).then(function(card2){
     if (!detail || detail.card !== c) return;
     if (card2){
       var keys = printingKeys(card2);
@@ -2250,10 +2250,25 @@ function visualIdentify(canvas){
 }
 /* Full catalog detail for one backend result id ("sm8-123"), fetched
    the same way every other candidate's detail is: a catalog query whose
-   rows carry pricing, images, and set data. Null when unfetchable. */
-function fetchCardById(id){
+   rows carry pricing, images, and set data. Null when unfetchable.
+   21m: the backend's ids don't always match the price API's — the
+   server catalog zero-pads set codes and numbers (sv09-080) where the
+   price API doesn't (sv9-80), and special sets use unrelated codes
+   (30th-120 vs me55-120) — so an empty id hit falls back to a
+   name+set+number query, which finds the same card under the price
+   API's own id (verified: the Larvitar fallback returns sv9-80 with
+   prices). The fallback fires only on empty, never on error
+   (retries already cover errors), and a number with leading zeros is
+   stripped for the query (the price API stores "80", not "080"). */
+function fetchCardById(id, meta){
   return apiFetchWithRetries('id:"' + String(id).replace(/"/g, "") + '"', 1).then(function(cards){
-    return (cards && cards.length) ? cards[0] : null;
+    if (cards && cards.length) return cards[0];
+    if (!meta || !meta.name || !meta.setName || !meta.number) return null;
+    var num = String(meta.number).replace(/^0+/, "") || "0";
+    var q = 'name:"' + String(meta.name).replace(/"/g, "") + '" set.name:"' + String(meta.setName).replace(/"/g, "") + '" number:"' + num + '"';
+    return apiFetchWithRetries(q, 5).then(function(cards2){
+      return (cards2 && cards2.length) ? cards2[0] : null;
+    });
   }).catch(function(){ return null; });
 }
 /* ---- parallel prefetch + per-session detail cache ----
@@ -2270,9 +2285,9 @@ function fetchCardById(id){
    any UI showing that list refreshes through onFill. A candidate whose
    fetch fails simply never enters the list, exactly as before. */
 var detailCache = {}; // card id -> Promise<card|null>
-function fetchCardDetail(id){
+function fetchCardDetail(id, meta){
   var key = String(id);
-  if (!detailCache[key]) detailCache[key] = fetchCardById(key);
+  if (!detailCache[key]) detailCache[key] = fetchCardById(key, meta);
   return detailCache[key];
 }
 function prefetchVisualDetails(orderedResults){
@@ -2289,7 +2304,7 @@ function prefetchVisualDetails(orderedResults){
     listeners.slice().forEach(function(fn){ fn(); });
   }
   var promises = results.map(function(r, i){
-    return fetchCardDetail(r.id).then(function(card){
+    return fetchCardDetail(r.id, { name: r.name, setName: r.setName, number: r.number }).then(function(card){
       if (card){ slots[i] = card; rebuild(); }
       return card;
     });
@@ -2822,6 +2837,12 @@ function presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, sc
       }
       return;
     }
+    /* 21m: a fetched winner with no price data at all (the price API
+       carries the card but no market prices yet — e.g. a brand-new
+       set) gets the same priceless treatment as an unfetched one:
+       the note and Retry prices button, so the sheet never pretends
+       a price exists and the user can retry once prices land. */
+    if (winnerCard && !printingKeys(winnerCard).length) winnerCard.noPrices = true;
     var cards = pref.cards;
     if (confident){
       scanning = false;
