@@ -407,7 +407,7 @@
       </div>
       <p class="sub" style="margin-top:14px">Prices come from TCGdex (TCGplayer market pricing) using the same card IDs your PC matches against. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-11-01n</p>
+      <p class="build-version">build 2026-11-01p</p>
     </section>
   </main>
 
@@ -2139,6 +2139,10 @@ var VISUAL_CONFIDENT_SCORE = 0.5;
    before the result is presented (see nameCheckPromote). At or above
    it, scans present immediately with no extra OCR. */
 var VISUAL_NAME_CHECK_MAX = 0.85;
+/* Catalog-wide name promotion (injecting a card the visual match never
+   saw) is allowed only below this visual top score. At or above it the
+   visual answer stands, however the name read scores. */
+var CATALOG_PROMOTE_MAX_VISUAL = 0.75;
 var NAME_CHECK_TIMEOUT_MS = 2500;
 function backendBase(){
   return (state.settings.backendUrl || "").trim().replace(/\/+$/, "");
@@ -2279,11 +2283,12 @@ function tcgdexToCard(d){
       if (!url && v.productId) url = "https://www.tcgplayer.com/product/" + v.productId;
     });
   }
+  var img = d.image || "";
   return {
     id: d.id, name: d.name, number: d.localId || null,
     rarity: d.rarity || null,
     set: { id: (d.set && d.set.id) || "", name: (d.set && d.set.name) || "" },
-    images: { small: d.image || "", large: d.image || "" },
+    images: { small: img ? img + "/low.webp" : "", large: img ? img + "/high.webp" : "" },
     tcgplayer: Object.keys(prices).length ? { prices: prices, url: url } : null
   };
 }
@@ -2565,6 +2570,15 @@ function strongestNameGroup(groups){
    Charizard, …) fires for none of them. A fragment hit is promoted
    and presented exactly like a full-string match. */
 var NAME_READ_NOISE = { basic: 1, stage: 1, hp: 1 };
+/* Words printed on the card that are NOT the name — the subtype label
+   and card-type label ("Supporter", "TRAINER", "Item", "Stadium",
+   "Pokémon Tool", "Energy"). A read that is exactly one such word is
+   furniture, not a name, and is dropped in cleanNameRead. They are
+   deliberately NOT in NAME_READ_NOISE: inside a longer read they may
+   be part of the name itself ("Item Finder", "Tool Scrapper", "Fire
+   Energy", "Gym Trainer", "Collapsed Stadium"), and stripping them
+   there would break those cards' matches. */
+var NAME_READ_LABEL = { supporter: 1, trainer: 1, item: 1, tool: 1, stadium: 1, energy: 1, pokemon: 1 };
 function cleanNameReadTokens(read){
   var norm = normalizeMatchName(read);
   if (!norm) return [];
@@ -2575,7 +2589,9 @@ function cleanNameReadTokens(read){
   });
 }
 function cleanNameRead(read){
-  return cleanNameReadTokens(read).join(" ");
+  var toks = cleanNameReadTokens(read);
+  if (toks.length === 1 && NAME_READ_LABEL[toks[0]]) return "";
+  return toks.join(" ");
 }
 /* Fragment candidates from cleaned reads, in the order the reads were
    ranked: each read's longest token, then the read as a whole. Only
@@ -2585,7 +2601,11 @@ function nameReadFragments(reads){
   function push(f){ if (f && f.length >= 4 && !seen[f]){ seen[f] = 1; out.push(f); } }
   (reads || []).forEach(function(r){
     var toks = cleanNameReadTokens(r), longest = "";
-    toks.forEach(function(t){ if (t.length > longest.length) longest = t; });
+    /* Label words ("trainer", "supporter", ...) are furniture, not
+       name fragments: "trainer" sits inside the head word of
+       "Trainers' Mail" and would uniquely (mis)identify it
+       (2026-11-13). Skip them when picking the identifying token. */
+    toks.forEach(function(t){ if (!NAME_READ_LABEL[t] && t.length > longest.length) longest = t; });
     push(longest);
     push(toks.join(" "));
   });
@@ -2756,6 +2776,13 @@ function promoteByNameReads(reads, ordered, numberWinnerId, number){
     }
     return false;
   }
+  /* A strong visual top is never overruled by a catalog name guess:
+     the name check may reorder the visual candidates, but it may only
+     inject an unseen card when the visual match is weak. A 0.790 top
+     that is really the card must not lose to a fuzzy read
+     ("supporter" -> "Eneporter", 2026-11-13). */
+  var topVisual = ordered[0] && typeof ordered[0].score === "number" ? ordered[0].score : null;
+  if (topVisual !== null && topVisual >= CATALOG_PROMOTE_MAX_VISUAL) return false;
   var group = bestCatalogNameMatch(reads);
   if (!group) return false;
   var alreadyCandidate = ordered.some(function(c){ return c && group.ids.indexOf(c.id) >= 0; });
