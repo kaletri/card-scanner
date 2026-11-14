@@ -405,9 +405,9 @@
         <div class="set-row"><div><div class="sl">Backend URL</div><div class="sd">Your PC identifies cards by their art (DINOv2) — much more accurate than on-device text reading. Clear the field to scan on-device only.</div></div><input type="text" id="setBackendUrl" placeholder="https://…ts.net"></div>
         <div class="set-row"><div><div class="sl">Connection</div><div class="sd" id="backendStatus">Not tested yet.</div></div><button class="btn" id="testBackendBtn" style="min-height:40px;padding:9px 14px">Test connection</button></div>
       </div>
-      <p class="sub" style="margin-top:14px">Prices and card data come from the Pokemon TCG API, which mirrors TCGplayer market pricing. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
+      <p class="sub" style="margin-top:14px">Prices come from TCGdex (TCGplayer market pricing) using the same card IDs your PC matches against. WorthIt uses the scanned condition's price as the expected eBay sale price.</p>
       <p class="sub" style="margin-top:8px">Your binders, lists, export archive, and these settings are saved in this browser on this device — nothing is stored on a server, and each device keeps its own copy.</p>
-      <p class="build-version">build 2026-11-01m</p>
+      <p class="build-version">build 2026-11-01n</p>
     </section>
   </main>
 
@@ -692,7 +692,11 @@ document.addEventListener("error", function(e){
   img.replaceWith(fallback);
 }, true);
 
-/* ================= Pokemon TCG API ================= */
+/* ================= Catalog search (Pokemon TCG API) =================
+   21n: this API now serves manual/OCR candidate search only. Prices
+   come from TCGdex (see fetchCardById) — the search records' own
+   prices are shown in search lists but scan detail always comes
+   from TCGdex. */
 var API = "https://api.pokemontcg.io/v2/cards";
 var API_FETCH_TIMEOUT_MS = 12000;
 function apiFetch(q, pageSize){
@@ -2075,7 +2079,7 @@ function retryPrices(){
   if (!detail || !detail.card || !detail.card.noPrices) return;
   var c = detail.card;
   delete detailCache[c.id];
-  fetchCardDetail(c.id, { name: c.name, setName: (c.set && c.set.name) || "", number: c.number }).then(function(card2){
+  fetchCardDetail(c.id).then(function(card2){
     if (!detail || detail.card !== c) return;
     if (card2){
       var keys = printingKeys(card2);
@@ -2249,27 +2253,69 @@ function visualIdentify(canvas){
   });
 }
 /* Full catalog detail for one backend result id ("sm8-123"), fetched
-   the same way every other candidate's detail is: a catalog query whose
-   rows carry pricing, images, and set data. Null when unfetchable.
-   21m: the backend's ids don't always match the price API's — the
-   server catalog zero-pads set codes and numbers (sv09-080) where the
-   price API doesn't (sv9-80), and special sets use unrelated codes
-   (30th-120 vs me55-120) — so an empty id hit falls back to a
-   name+set+number query, which finds the same card under the price
-   API's own id (verified: the Larvitar fallback returns sv9-80 with
-   prices). The fallback fires only on empty, never on error
-   (retries already cover errors), and a number with leading zeros is
-   stripped for the query (the price API stores "80", not "080"). */
-function fetchCardById(id, meta){
-  return apiFetchWithRetries('id:"' + String(id).replace(/"/g, "") + '"', 1).then(function(cards){
-    if (cards && cards.length) return cards[0];
-    if (!meta || !meta.name || !meta.setName || !meta.number) return null;
-    var num = String(meta.number).replace(/^0+/, "") || "0";
-    var q = 'name:"' + String(meta.name).replace(/"/g, "") + '" set.name:"' + String(meta.setName).replace(/"/g, "") + '" number:"' + num + '"';
-    return apiFetchWithRetries(q, 5).then(function(cards2){
-      return (cards2 && cards2.length) ? cards2[0] : null;
+   from TCGdex. 21n: prices moved from pokemontcg.io to TCGdex — the
+   server catalog IS TCGdex data, so the backend's id IS the TCGdex
+   id (sv09-080, 30th-120): no set-code translation, no
+   name+set+number fallback, and the 21m fallback (with its
+   error-skips-fallback flaw) is retired. TCGdex needs no API key,
+   so this stays phone-side. A TCGdex record is adapted into the
+   app's existing card shape (tcgplayer.prices with market/mid), so
+   every price consumer — printingKeys, condPrice, nmMarket, the
+   detail sheet — works unchanged. Null when unfetchable, and null
+   tcgplayer when the record carries no market prices yet (the
+   noPrices path handles that, same as before). */
+var TCGDEX = "https://api.tcgdex.net/v2/en/cards";
+function tcgdexToCard(d){
+  if (!d) return null;
+  var tp = (d.pricing && d.pricing.tcgplayer) || null;
+  var prices = {};
+  var url = "";
+  if (tp){
+    Object.keys(tp).forEach(function(k){
+      var v = tp[k];
+      if (!v || (v.marketPrice == null && v.midPrice == null)) return;
+      var key = k.replace(/-([a-z])/g, function(_, c){ return c.toUpperCase(); });
+      prices[key] = { market: (v.marketPrice != null ? v.marketPrice : null), mid: (v.midPrice != null ? v.midPrice : null) };
+      if (!url && v.productId) url = "https://www.tcgplayer.com/product/" + v.productId;
     });
-  }).catch(function(){ return null; });
+  }
+  return {
+    id: d.id, name: d.name, number: d.localId || null,
+    rarity: d.rarity || null,
+    set: { id: (d.set && d.set.id) || "", name: (d.set && d.set.name) || "" },
+    images: { small: d.image || "", large: d.image || "" },
+    tcgplayer: Object.keys(prices).length ? { prices: prices, url: url } : null
+  };
+}
+function tcgdexFetch(id){
+  var url = TCGDEX + "/" + encodeURIComponent(id);
+  var controller = new AbortController();
+  var timer = setTimeout(function(){ controller.abort(); }, API_FETCH_TIMEOUT_MS);
+  return fetch(url, { signal: controller.signal }).then(function(r){
+    clearTimeout(timer);
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error("TCGdex returned " + r.status);
+    return r.json();
+  }, function(err){
+    clearTimeout(timer);
+    throw err;
+  }).then(function(d){
+    return tcgdexToCard(d);
+  });
+}
+function tcgdexFetchWithRetries(id){
+  var attempt = 0;
+  function run(){
+    attempt += 1;
+    return tcgdexFetch(id).catch(function(err){
+      if (attempt >= API_QUERY_ATTEMPTS) throw err;
+      return new Promise(function(resolve){ setTimeout(resolve, API_RETRY_DELAY_MS); }).then(run);
+    });
+  }
+  return run();
+}
+function fetchCardById(id){
+  return tcgdexFetchWithRetries(String(id)).catch(function(){ return null; });
 }
 /* ---- parallel prefetch + per-session detail cache ----
    Detail fetches are the slow tail of a visual ID: each one is an
@@ -2285,9 +2331,9 @@ function fetchCardById(id, meta){
    any UI showing that list refreshes through onFill. A candidate whose
    fetch fails simply never enters the list, exactly as before. */
 var detailCache = {}; // card id -> Promise<card|null>
-function fetchCardDetail(id, meta){
+function fetchCardDetail(id){
   var key = String(id);
-  if (!detailCache[key]) detailCache[key] = fetchCardById(key, meta);
+  if (!detailCache[key]) detailCache[key] = fetchCardById(key);
   return detailCache[key];
 }
 function prefetchVisualDetails(orderedResults){
@@ -2304,7 +2350,7 @@ function prefetchVisualDetails(orderedResults){
     listeners.slice().forEach(function(fn){ fn(); });
   }
   var promises = results.map(function(r, i){
-    return fetchCardDetail(r.id, { name: r.name, setName: r.setName, number: r.number }).then(function(card){
+    return fetchCardDetail(r.id).then(function(card){
       if (card){ slots[i] = card; rebuild(); }
       return card;
     });
@@ -2807,8 +2853,8 @@ function presentOrderedVisual(ordered, topScore, confident, src, sourceLabel, sc
        prices — but when it doesn't, the scan still SHOWS the match
        instead of erroring or silently guessing. The PC's
        identification (name, set, number) is real data; only the
-       price-catalog row is missing (a set numbering the catalog
-       doesn't share — e.g. sv09-080 404s there — or a failed fetch).
+       price-catalog row is missing (the catalog has no market prices
+       for it yet — e.g. a new set — or a failed fetch).
        So the winner is presented as a priceless card: its picture is
        the scanned photo, its condition rows are disabled (nothing
        gets added at a wrong price), and a Retry prices button covers
